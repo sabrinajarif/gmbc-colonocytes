@@ -1,0 +1,1048 @@
+---
+title: "QC, filtering, and taxonomic/ functional profiling of GMbC metagenomes"
+author: "Sabrina J Arif"
+---
+
+# Process raw PE fastq files of metagenomic shotgun sequences
+
+## QC and filtering
+
+First, we have some openbiome samples that need to be renamed.
+```{bash, eval=F}
+cd /home/blekhman/sarif/gmbc_ccyte/2023_GMbC_metaG/openbiome_samples
+
+mv FMP112_S1_R1_001.fastq.gz FMG112_P_1.fastq.gz
+mv FMP112_S1_R2_001.fastq.gz FMG112_P_2.fastq.gz
+mv lucaAR31_S16_R1_001.fastq.gz FMG28_P_1.fastq.gz
+mv lucaAR31_S16_R2_001.fastq.gz FMG28_P_2.fastq.gz
+mv lucaAR32_S17_R1_001.fastq.gz FMG65_P_1.fastq.gz
+mv lucaAR32_S17_R2_001.fastq.gz FMG65_P_2.fastq.gz
+mv lucaAR33_S18_R1_001.fastq.gz FMG110_P_1.fastq.gz
+mv lucaAR33_S18_R2_001.fastq.gz FMG110_P_2.fastq.gz
+mv lucaAR34_S19_R1_001.fastq.gz FMG111_P_1.fastq.gz
+mv lucaAR34_S19_R2_001.fastq.gz FMG111_P_2.fastq.gz
+```
+Create some directories in preparation
+```{bash, eval=F}
+mkdir /scratch.global/sarif/2023_GMbC_metaG/QC_out
+mkdir /scratch.global/sarif/2023_GMbC_metaG/QC_out/fastqc
+mkdir /scratch.global/sarif/2023_GMbC_metaG/QC_out/fastqc/raw
+mkdir /scratch.global/sarif/2023_GMbC_metaG/QC_out/cutadapt
+mkdir /scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata
+mkdir /scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata/summary
+mkdir /scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata/summary/metrics
+```
+Preliminary fastqc
+```{bash, eval=F}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH -p blekhman
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+module load parallel
+module load fastqc
+
+export _JAVA_OPTIONS="-Xmx60g"
+
+find /home/blekhman/sarif/gmbc_ccyte/2023_GMbC_metaG /home/blekhman/sarif/gmbc_ccyte/2023_GMbC_metaG/openbiome_samples -name "*_P_1.fastq.gz" | parallel -j 4 '
+  filename=$(basename "{}")
+  fname="${filename%_P*.fastq.gz}"
+  fastqc "{}" "${fname}_P_2.fastq.gz" -o /scratch.global/sarif/2023_GMbC_metaG/QC_out/fastqc/raw
+'
+```
+```{bash, eval=F}
+sbatch fastqc_raw.sh
+```
+Cutadapt: GMbC only
+```{bash, eval=F}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH -p blekhman
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+module load cutadapt
+
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/QC_out/cutadapt
+cd /home/blekhman/sarif/gmbc_ccyte/2023_GMbC_metaG
+
+for file in *_P_1.fastq.gz
+do
+  filename=$(basename "$file")
+  fname="${filename%_P*.fastq.gz}"
+  cutadapt -a CTGTCTCTTAT -A CTGTCTCTTAT -o "$OUT_DIR/${fname}_P_1.fastq.gz" -p "$OUT_DIR/${fname}_P_2.fastq.gz" "${fname}_P_1.fastq.gz" "${fname}_P_2.fastq.gz"
+done
+```
+```{bash, eval=F}
+sbatch cutadapt_gmbc.sh
+```
+Cutadapt: OpenBiome
+```{bash, eval=F}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH -p blekhman
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+module load cutadapt
+
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/QC_out/cutadapt
+cd /home/blekhman/sarif/gmbc_ccyte/2023_GMbC_metaG/openbiome_samples
+
+for file in *_P_1.fastq.gz
+do
+  filename=$(basename "$file")
+  fname="${filename%_P*.fastq.gz}"
+  cutadapt -a CTGTCTCTTATACACATCT -A CTGTCTCTTATACACATCT -o "$OUT_DIR/${fname}_P_1.fastq.gz" -p "$OUT_DIR/${fname}_P_2.fastq.gz" "${fname}_P_1.fastq.gz" "${fname}_P_2.fastq.gz"
+done
+```
+```{bash, eval=F}
+sbatch cutadapt_openbiome.sh
+```
+Finish up QC using kneaddata. This uses trimmomatic for quality filtering, removes reads mapping to the bowtie human database, and uses trf to remove repetitive sequences. We split into batches of 10 samples each for efficiency
+```{bash, eval=F}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=16g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/QC_out
+REF_DIR=/home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/bowtie2_human_db
+BATCH_SIZE=10
+
+cd $OUT_DIR/cutadapt
+
+# create batches directory if it doesn't exist
+mkdir -p batches
+
+# split samples into batches
+samples=(*_P_1.fastq.gz)
+for (( i=0; i<${#samples[@]}; i+=BATCH_SIZE )); do
+    batch_samples=("${samples[@]:i:BATCH_SIZE}")
+    batch_script=batches/batch_${i}.sh
+    
+    # create array of input files
+    declare -a input_files=()
+    for j in "${batch_samples[@]}"; do
+        input_files+=("${j%_P_1.fastq.gz}")
+    done
+
+    # create new script to run batch of samples
+    echo '#!/bin/sh' > $batch_script
+    echo "#SBATCH --time=24:00:00" >> $batch_script
+    echo "#SBATCH --ntasks=8" >> $batch_script
+    echo "#SBATCH --mem=60g" >> $batch_script
+    echo "#SBATCH -p blekhman" >> $batch_script
+    echo "#SBATCH --mail-type=ALL" >> $batch_script
+    echo "#SBATCH --mail-user=sarif@umn.edu" >> $batch_script
+    echo "" >> $batch_script
+    echo "OUT_DIR=$OUT_DIR" >> $batch_script
+    echo "REF_DIR=$REF_DIR" >> $batch_script
+    echo "" >> $batch_script
+    echo "cd $OUT_DIR/cutadapt" >> $batch_script
+    echo "" >> $batch_script
+    echo "module load fastqc" >> $batch_script
+    echo "module load trimmomatic" >> $batch_script
+    echo "module load bowtie2" >> $batch_script
+    echo "module load trf" >> $batch_script
+    echo "" >> $batch_script
+    
+    echo 'function run_kneaddata() {
+    local sample="$1"
+
+    kneaddata \
+        --input "${sample}_P_1.fastq.gz" \
+        --input "${sample}_P_2.fastq.gz" \
+        --output "$OUT_DIR/kneaddata" \
+        --threads 8 \
+        --reference-db "$REF_DIR" \
+        --run-fastqc-start \
+        --run-fastqc-end \
+        --remove-intermediate-output -t 5 -p 2 \
+        --trimmomatic-options="LEADING:3" \
+        --trimmomatic-options="TRAILING:3" \
+        --trimmomatic-options="SLIDINGWINDOW:5:20" \
+        --trimmomatic-options="MINLEN:50"
+}' >> $batch_script
+
+    # run kneaddata on each sample in the batch using for loop
+    for j in "${input_files[@]}"; do
+        echo "run_kneaddata $j"  >> $batch_script
+    done
+done
+```
+```{bash, eval=F}
+sbatch kneaddata_batches.sh 
+```
+Now submit all the batches
+```{bash, eval=F}
+# Loop through all batch scripts in the directory and submit them as separate jobs
+for batch_script in /scratch.global/sarif/2023_GMbC_metaG/QC_out/cutadapt/batches/*; do
+    echo "Submitting batch script: $batch_script"
+    sbatch "$batch_script"
+done
+```
+Create summary table and clean up file structure
+```{bash, eval=F}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=16g
+#SBATCH -p blekhman
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+IN_DIR=/scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata/summary
+
+#Output kneaddata report
+kneaddata_read_count_table --input "$IN_DIR" --output "$OUT_DIR/kneaddata_read_counts.txt"
+
+#Clean up file structure
+cd $OUT_DIR
+
+mkdir homo_sap
+mkdir unmatched
+mkdir logs
+mkdir contam
+
+mv $IN_DIR/*Homo_sapiens* $OUT_DIR/homo_sap/.
+mv $IN_DIR/*unmatched* $OUT_DIR/unmatched/.
+mv $IN_DIR/*log* $OUT_DIR/logs/.
+mv $IN_DIR/*contam* $OUT_DIR/contam/.
+```
+```{bash, eval=F}
+sbatch compile_kneaddata.sh 
+```
+Finally, clean up and compile the fastqc files 
+```{bash, eval=F}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=16g
+#SBATCH -p blekhman
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+IN_DIR=/scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata/fastqc
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/QC_out/fastqc
+
+mkdir $OUT_DIR/post_kneaddata
+
+# Find all files and directories with "kneaddata" string and move
+find $IN_DIR \( -type f -o -type d \) -name "*kneaddata*" -exec mv {} $OUT_DIR/post_kneaddata/ \;
+# Remaining files are post-cutadapt; rename and move
+mv $IN_DIR $OUT_DIR/post_cutadapt
+
+multiqc $OUT_DIR/raw -o $OUT_DIR/raw
+multiqc $OUT_DIR/post_cutadapt -o $OUT_DIR/post_cutadapt
+multiqc $OUT_DIR/post_kneaddata -o $OUT_DIR/post_kneaddata
+
+multiqc_compare --dirs $OUT_DIR/raw $OUT_DIR/post_cutadapt $OUT_DIR/post_kneaddata --file-name multiqc_comparison.html -o $OUT_DIR
+```
+```{bash, eval=F}
+sbatch compile_fastqc.sh 
+```
+
+The output in the kneaddata folder: \
+
+* For each paired sample, a F and R fastq file with the string "kneaddata", indicating they have been quality-controlled, filtered, trimmed.
+* For each paired sample, a F and R fastq file with the string "kneaddata_hg37dec_v0.1_bowtie2_paired_contam" indicating that these are the contaminated sequences from testing against a database
+* "unmatched" directory containing unmatched reads
+* "logs" directory containing log files
+* "homo_sap" directory containing human reads
+* a txt file called "kneaddata_read_counts". This file contains a summary of the read filtration, including raw read count, adaptor trimmed read count, human-exluded reads, and final read counts of the paired and orphan reads.
+
+Download the fastq reports and check quality before running kraken. We will extract the raw files later and compile them, but for now we can just look at the html reports.
+```{bash}
+sftp sarif@mesabi.msi.umn.edu:/scratch.global/sarif/2023_GMbC_metaG/QC_out/fastqc/ << EOF
+get raw/multiqc_report.html /Users/sabri/Downloads/multiqc_report_raw.html
+get post_cutadapt/multiqc_report.html /Users/sabri/Downloads/multiqc_report_cutadapt.html
+get post_kneaddata/multiqc_report.html /Users/sabri/Downloads/multiqc_report_kneaddata.html
+EOF
+```
+
+
+## Taxonomic profiling
+
+Next, classification with Kraken and Bracken. 
+Create some directories in preparation
+```{bash, eval=F}
+mkdir /scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata/kraken_scripts
+mkdir /scratch.global/sarif/2023_GMbC_metaG/tax_profiling
+mkdir /scratch.global/sarif/2023_GMbC_metaG/tax_profiling/kraken
+mkdir /scratch.global/sarif/2023_GMbC_metaG/tax_profiling/kraken/output
+mkdir /scratch.global/sarif/2023_GMbC_metaG/tax_profiling/kraken/reports
+mkdir /scratch.global/sarif/2023_GMbC_metaG/tax_profiling/bracken
+```
+Kraken
+```{bash}
+cd /scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata
+samples=$(ls *_P_1_kneaddata_paired_1.fastq | sed 's/_P_1_kneaddata_paired_1.fastq//' | sort -u)
+
+cd kraken_scripts
+
+for sample in ${samples}; do
+    cat << EOF > "${sample}.job"
+#!/bin/bash
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=100g
+#SBATCH -p blekhman
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=sarif@umn.edu
+#SBATCH --job-name="${sample}_kraken"
+
+IN_DIR=/scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/tax_profiling/kraken
+REF_DIR=/home/blekhman/shared/GMbC_metagenomes/kraken2_db_completed
+
+cd /scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata
+
+module load kraken
+
+function run_kraken() {
+    local sample_name="\$1"
+
+    kraken2 --db \${REF_DIR} \
+    --paired \
+    --threads 8 \
+    --use-names \
+    --output \${OUT_DIR}/output/\${sample_name}_output.txt \
+    --report \${OUT_DIR}/reports/\${sample_name}_report.txt \
+    --report-zero-counts \${sample_name}_P_1_kneaddata_paired_1.fastq \${sample_name}_P_1_kneaddata_paired_2.fastq
+}
+
+run_kraken ${sample}
+EOF
+done
+```
+```{bash}
+for jobfile in *.job; do
+    sbatch "${jobfile}"
+done
+```
+Abundance estimation with Bracken
+```{bash, eval=F}
+cd /scratch.global/sarif/2023_GMbC_metaG/tax_profiling/kraken/reports
+samples=$(ls *_report.txt | sed 's/_report.txt//' | sort -u)
+
+cd scripts
+
+for sample in ${samples}; do
+    cat << EOF > "${sample}.job"
+#!/bin/bash
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH -p blekhman
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=sarif@umn.edu
+    
+IN_DIR=/scratch.global/sarif/2023_GMbC_metaG/tax_profiling/kraken/reports
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/tax_profiling/bracken
+REF_DIR=/home/blekhman/shared/GMbC_metagenomes/kraken2_db_completed
+    
+cd /scratch.global/sarif/2023_GMbC_metaG/tax_profiling/kraken/reports
+   
+module load bracken
+module load python
+
+function run_bracken() {
+    local sample_name="\$1"
+
+    bracken -d \${REF_DIR} -i \${sample_name}_report.txt -r 150 -t 10 -l S \
+        -o \${OUT_DIR}/\${sample_name}_bracken_species.txt
+        }
+
+run_bracken ${sample}
+EOF
+done
+```
+```{bash}
+for jobfile in *.job; do
+    sbatch "${jobfile}"
+done
+```
+Combined abundance tables
+```{bash, eval=F}
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/tax_profiling/bracken/summary
+PACKAGE_DIR=/home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/Bracken-2.6.2/analysis_scripts
+
+module load bracken
+module load python
+
+cd /scratch.global/sarif/2023_GMbC_metaG/tax_profiling/bracken
+
+files=$(ls *_bracken_species.txt | sort -u)
+samples=$(ls *_bracken_species.txt | sed 's/_bracken_species.txt//' | sort -u | tr '\n' ',')
+
+#https://github.com/jenniferlu717/Bracken/blob/master/analysis_scripts/combine_bracken_outputs.py
+# I MADE THIS CORRECTION TO THE ORIGINAL SCRIPT: 
+# taxid = sample_counts[name].keys()[0]   replaced with     taxid = list(sample_counts[name].keys())[0]
+python $PACKAGE_DIR/combine_bracken_outputs_sjaedit.py --files $files --names $samples -o summary/bracken_species_combined.txt
+```
+Finally, get taxonomy table from original kraken db
+```{bash}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=100g
+#SBATCH -p blekhman
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/tax_profiling/bracken/summary
+
+cd $OUT_DIR
+
+module load kraken
+
+kraken2-inspect --db /home/blekhman/shared/GMbC_metagenomes/kraken2_db_completed --threads 8 --report-zero-counts --table > taxonomy2.txt
+
+```
+Download
+```{bash}
+sftp sarif@mesabi.msi.umn.edu:/scratch.global/sarif/2023_GMbC_metaG/tax_profiling/bracken/summary/ << EOF
+get bracken_species_combined.txt /Users/sabri/Downloads/bracken_species_combined.txt
+get taxonomy.tsv /Users/sabri/Downloads/taxonomy.tsv
+EOF
+```
+Peek at data
+```{r}
+library(tidyverse)
+library(stringr)
+
+bracken_species_combined <- read.csv("~/Downloads/bracken_species_combined.txt", sep="\t")
+head(bracken_species_combined)
+
+taxonomy <- read.csv("~/Downloads/taxonomy.tsv", sep="\t", header=F)
+# This messy solution is required because of the bad strings
+taxonomy_sep <- taxonomy %>%
+  mutate(row = V1) %>%
+  column_to_rownames("row") %>%
+  rename(taxonomy_id=2) %>%
+  select(taxonomy_id, everything()) %>%
+  mutate(d=str_extract(V1, "(?<=d__)[^|]+")) %>%
+  mutate(k=str_extract(V1, "(?<=k__)[^|]+")) %>%
+  mutate(p=str_extract(V1, "(?<=p__)[^|]+")) %>%
+  mutate(c=str_extract(V1, "(?<=c__)[^|]+")) %>%
+  mutate(o=str_extract(V1, "(?<=o__)[^|]+")) %>%
+  mutate(f=str_extract(V1, "(?<=f__)[^|]+")) %>%
+  mutate(g=str_extract(V1, "(?<=g__)[^|]+")) %>%
+  mutate(s=str_extract(V1, "(?<=s__)[^|]+")) %>%
+  select(!V1)
+
+head(taxonomy_sep)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Functional profiling
+I THINK I CAN USE KRAKEN/BRACKEN INPUT BUT IT MIGHT BE MORE COMPLICATED THAN I THOUGHT. NEED TO CREATE CUSTOM NUC AND PROT DATABASES IN THE STYLE OF METAPHLAN (MPA)
+```{bash, eval=F}
+mkdir /scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata/humann_scripts
+mkdir /scratch.global/sarif/2023_GMbC_metaG/func_profiling
+```
+humann
+```{bash, eval=F}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=32
+#SBATCH --mem=100g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+
+#Script for functional profiling of paired-end reads using HUMANn2
+
+
+#notes: - program assumes fastq files residing in single folder (typically will be kneaddata_out folder)
+#       - modify if have fasta or other file name (e.g., .fna, .fq, etc.)
+#         - program assumes reads have already been quality filtered and contaminants (human) removed
+#       - script outputs: stratified and unstratifed pathways and gene family files in CPM
+#       - HUMANn2 does not handle PE reads directly; so this script concatenates the F and R reads for each sample before running
+
+cd /scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata
+samples=$(ls *_P_1_kneaddata_paired_1.fastq | sed 's/_P_1_kneaddata_paired_1.fastq//' | sort -u)
+
+cd bracken_scripts
+
+IN_DIR_kraken=/scratch.global/sarif/2023_GMbC_metaG/tax_profiling/kraken/p1p2_combined
+IN_DIR_bracken=/scratch.global/sarif/2023_GMbC_metaG/tax_profiling/bracken/p1p2_combined
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/func_profiling
+REF_DIR_nuc=/home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/chocophlan
+REF_DIR_prot=/home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/uniref
+
+cd $IN_DIR
+
+#Load modules
+module load python
+
+# Load venv
+conda activate biobakery3
+
+#Run HUMAnN
+for i in *.fastq
+do
+  humann --input-format kraken --kraken $IN_DIR_kraken/$i.kraken --bracken $IN_DIR_bracken/$i.bracken --output $OUT_DIR --nucleotide-database $REF_DIR_nuc --protein-database $REF_DIR_prot --threads 32 --translated-identity-threshold 97 --prescreen-threshold 0.0001 --nucleotide-query-coverage-threshold 70 --translated-query-coverage-threshold 97 --diamond-options="--threads 32"
+done
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Taxonomic profiling
+
+Next, classification with Kraken and Bracken. I ran this on ram256g partition due to large memory requirements
+```{bash, eval=F}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=200g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/kraken_out
+REF_DIR=/home/blekhman/shared/GMbC_metagenomes/kraken2_db_completed
+
+mkdir $OUT_DIR/output
+mkdir $OUT_DIR/reports
+
+cd /scratch.global/sarif/2023_GMbC_metaG/kneaddata_out
+
+module load kraken
+
+for i in *_kneaddata_paired_1.fastq
+do
+  filename=$(basename "$i")
+  fname="${filename%_kneaddata_paired_*.fastq}"
+  kraken2 --db "$REF_DIR" \
+  --confidence 0.1 \
+  --threads 32 \
+  --use-names \
+  --output "$OUT_DIR/output/${fname}_output.txt" \
+  --report "$OUT_DIR/reports/${fname}_report.txt" \
+  --report-zero-counts \
+  --paired ${fname}_kneaddata_paired_1.fastq ${fname}_kneaddata_paired_2.fastq
+done
+```
+```{bash, eval=F}
+sbatch -p ram256g run_kraken.sh 
+```
+Abundance estimation with bracken. Much less memory required for this
+```{bash, eval=F}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH -p blekhman
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/bracken_out
+REF_DIR=/home/blekhman/shared/GMbC_metagenomes/kraken2_db_completed
+
+mkdir $OUT_DIR/species
+mkdir $OUT_DIR/genus
+
+module load bracken
+module load python
+
+#Abundance estimation with braken (phylum, genus, species)
+cd /scratch.global/sarif/2023_GMbC_metaG/kraken_out/reports
+
+# Species
+for i in *_report.txt
+do
+  filename=$(basename "$i")
+  fname="${filename%_report.txt}"
+  bracken -d "$REF_DIR" -i $i -r 150 -t 10 -l S -o ${fname}_report_species.txt
+done
+mv *_report_species.txt "$OUT_DIR/species".
+
+# Genus
+for i in *_report.txt
+do
+  filename=$(basename "$i")
+  fname="${filename%_report.txt}"
+  bracken -d "$REF_DIR" -i $i -r 150 -t 10 -l G -o ${fname}_report_genus.txt
+done
+mv *_report_species.txt "$OUT_DIR/genus".
+```
+```{bash, eval=F}
+sbatch run_bracken.sh 
+```
+
+Combined abundance tables
+```{bash, eval=F}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH -p blekhman
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/bracken_out
+PACKAGE_DIR=/home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/KrakenTools
+
+mkdir $OUT_DIR/species/mpa
+mkdir $OUT_DIR/genus/mpa
+mkdir $OUT_DIR/species/mpa/combined
+mkdir $OUT_DIR/genus/mpa/combined
+
+module load bracken
+module load python
+
+cd /scratch.global/sarif/2023_GMbC_metaG/kraken_out/reports
+
+
+for i in *_report_bracken_species.txt
+do
+  filename=$(basename "$i")
+  fname="${filename%_report_bracken_species.txt}"
+  python "$PACKAGE_DIR/kreport2mpa.py" -r $i -o "$OUT_DIR/species/mpa/${fname}_mpa.txt" --display-header
+done
+
+python "$PACKAGE_DIR/combine_mpa.py" -i "$OUT_DIR/species/mpa/*_mpa.txt" -o "$OUT_DIR/species/mpa/combined/combined_species_mpa.txt"
+grep -E "(s__)|(#Classification)" "$OUT_DIR/species/mpa/combined/combined_species_mpa.txt" > "$OUT_DIR/species/mpa/combined/bracken_abundance_species_mpa.txt"
+
+
+for i in *_report_bracken_genus.txt
+do
+  filename=$(basename "$i")
+  fname="${filename%_report_bracken_genus.txt}"
+  python "$PACKAGE_DIR/kreport2mpa.py" -r $i -o "$OUT_DIR/genus/mpa/${fname}_mpa.txt" --display-header
+done
+
+python "$PACKAGE_DIR/combine_mpa.py" -i "$OUT_DIR/genus/mpa/*_mpa.txt" -o "$OUT_DIR/genus/mpa/combined/combined_genus_mpa.txt"
+grep -E "(g__)|(#Classification)" "$OUT_DIR/genus/mpa/combined/combined_genus_mpa.txt" > "$OUT_DIR/genus/mpa/combined/bracken_abundance_genus_mpa.txt"
+
+
+#Cleaning up sample names
+sed -i -e 's/_report_bracken_species.txt//g' "$OUT_DIR/species/mpa/combined/bracken_abundance_species_mpa.txt"
+sed -i -e 's/_report_bracken_genus.txt//g' "$OUT_DIR/genus/mpa/combined/bracken_abundance_genus_mpa.txt"
+
+#Cleaning up top-level folders
+cd ..
+mkdir bracken_abundance_files
+cp "$OUT_DIR/species/mpa/combined/bracken_abundance_species_mpa.txt" bracken_abundance_files/.
+cp "$OUT_DIR/genus/mpa/combined/bracken_abundance_genus_mpa.txt" bracken_abundance_files/.
+```
+
+
+## Functional profiling
+
+Concentrate P1 and P2, and create batches for easier processing
+```{bash}
+#Concatenate files
+cd /scratch.global/sarif/2023_GMbC_metaG/kneaddata_out
+mkdir output_cat
+
+for name in *_kneaddata_paired_1.fastq; do
+    other="${name/_paired_1/_paired_2}"
+    cat "$name" "$other" > output_cat/"$name"
+done
+
+cd output_cat
+for file in *; do mv "${file}" "${file/_R1_kneaddata_paired_1/}"; done
+
+# Organize into batches for easier file processing. 
+# Here I want each batch to contain about 16 samples each.
+mkdir batches
+# Split the file list into four batches of roughly equal size
+ls *.fastq | split -l 16 - batches/batch_
+
+cd /scratch.global/sarif/2023_GMbC_metaG
+mkdir humann_output
+```
+I think you need to run this first before submitting the jobs??
+```{r}
+#Load modules
+module load python
+# Load venv
+conda activate biobakery3
+```
+
+ALL SAMPLES AT ONCE
+Run humann: https://github.com/biobakery/biobakery/wiki/humann3
+```{bash}
+#!/bin/sh        
+#SBATCH --time=48:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=200g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+
+#Script for functional profiling of paired-end reads using HUMANn2
+
+
+#notes: - program assumes fastq files residing in single folder (typically will be kneaddata_out folder)
+#       - modify if have fasta or other file name (e.g., .fna, .fq, etc.)
+#         - program assumes reads have already been quality filtered and contaminants (human) removed
+#       - script outputs: stratified and unstratifed pathways and gene family files in CPM
+#       - HUMANn2 does not handle PE reads directly; so this script concatenates the F and R reads for each sample before running
+
+
+#Navigate to folder containing fastq files
+cd /scratch.global/sarif/kneaddata_out/output_cat
+
+#Load modules
+module load python
+#module load anaconda3
+#source activate metaphlan3
+
+# Load venv
+conda activate biobakery3
+
+mkdir hmn_output
+
+#Run HUMAnN
+for i in *.fastq
+do
+  humann --input $i --output hmn_output --nucleotide-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/chocophlan --protein-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/uniref --threads 16
+done
+```
+
+
+BATCHES
+Batch 1
+```{r}
+#!/bin/sh        
+#SBATCH --time=48:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+
+#Script for functional profiling of paired-end reads using HUMANn2
+
+
+#notes: - program assumes fastq files residing in single folder (typically will be kneaddata_out folder)
+#       - modify if have fasta or other file name (e.g., .fna, .fq, etc.)
+#         - program assumes reads have already been quality filtered and contaminants (human) removed
+#       - script outputs: stratified and unstratifed pathways and gene family files in CPM
+#       - HUMANn2 does not handle PE reads directly; so this script concatenates the F and R reads for each sample before running
+
+
+#Navigate to folder containing fastq files
+cd /scratch.global/sarif/kneaddata_out/output_cat
+
+#Load modules
+module load python
+
+# Load venv
+conda activate biobakery3
+
+for i in $(cat batches/batch_aa)
+do
+  humann --input $i --output humann_output --nucleotide-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/chocophlan --protein-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/uniref --threads 16
+done
+```
+Batch 2
+```{r}
+#!/bin/sh        
+#SBATCH --time=48:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+cd /scratch.global/sarif/kneaddata_out/output_cat
+module load python
+conda activate biobakery3
+
+for i in $(cat batches/batch_ab)
+do
+  humann --input $i --output humann_output --nucleotide-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/chocophlan --protein-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/uniref --threads 16
+done
+```
+Batch 3
+```{r}
+#!/bin/sh        
+#SBATCH --time=48:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+cd /scratch.global/sarif/kneaddata_out/output_cat
+module load python
+conda activate biobakery3
+
+for i in $(cat batches/batch_ac)
+do
+  humann --input $i --output humann_output --nucleotide-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/chocophlan --protein-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/uniref --threads 16
+done
+```
+Batch 4
+```{r}
+#!/bin/sh        
+#SBATCH --time=48:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+cd /scratch.global/sarif/kneaddata_out/output_cat
+module load python
+conda activate biobakery3
+
+for i in $(cat batches/batch_ad)
+do
+  humann --input $i --output humann_output --nucleotide-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/chocophlan --protein-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/uniref --threads 16
+done
+```
+Batch 5
+```{r}
+#!/bin/sh        
+#SBATCH --time=48:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+cd /scratch.global/sarif/kneaddata_out/output_cat
+module load python
+conda activate biobakery3
+
+for i in $(cat batches/batch_ae)
+do
+  humann --input $i --output humann_output --nucleotide-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/chocophlan --protein-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/uniref --threads 16
+done
+```
+
+
+
+
+
+
+```{r}
+cd /scratch.global/sarif/kneaddata_out/output_cat
+
+module load python3
+#source activate metaphlan2
+conda activate biobakery3
+
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=60g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+#Join all gene family and pathway abudance files
+humann_join_tables --input ../hmn_output/ --file_name pathabundance --output humann_pathabundance.tsv
+humann_join_tables --input ../hmn_output/ --file_name genefamilies --output humann_genefamilies.tsv
+
+
+#Normalizing RPKs to CPM
+humann_renorm_table --input humann_pathabundance.tsv --units cpm --output humann_pathabundance_cpm.tsv
+humann_renorm_table --input humann_genefamilies.tsv --units cpm --output humann_genefamilies_cpm.tsv
+
+
+#Generate stratified tables
+humann_split_stratified_table --input humann_pathabundance_cpm.tsv --output ./
+humann_split_stratified_table --input humann_genefamilies_cpm.tsv --output ./
+
+
+#Cleaning up file structure
+mkdir hmn_pathway_abundance_files
+mkdir hmn_genefamily_abundance_files
+
+mv *pathabundance* hmn_pathway_abundance_files/.
+mv *genefamilies* hmn_genefamily_abundance_files/.
+```
+
+# Export as a phyloseq object for downstream analyses
+Source: https://www.nicholas-ollberding.com/post/taxonomic-and-functional-profiling-using-biobakery-workflows/
+
+```{r}
+library(tidyverse); packageVersion("tidyverse")     #version: 2.0.0 
+library(phyloseq); packageVersion("phyloseq")       #version: 1.42.0
+```
+
+### Bracken: species abundance phyloseq object
+```{r}
+s_abund <- read_tsv("data/bracken_abundance_species_mpa.txt")
+
+s_tax_tab <- s_abund %>%
+  dplyr::rename("taxonomy" = "#Classification") %>%
+  dplyr::select(taxonomy) %>%
+  dplyr::mutate(Species = sub('.*\\|', '', taxonomy),
+                Species = gsub("s__", "", Species),
+                spec_row = Species) %>%
+  dplyr::select(-taxonomy) %>%
+  tibble::column_to_rownames(var = "spec_row")
+
+s_otu_tab <- s_abund %>%
+  dplyr::rename("taxonomy" = "#Classification") %>%
+  dplyr::mutate(taxonomy = sub('.*\\|', '', taxonomy),
+                taxonomy = gsub("s__", "", taxonomy)) %>%
+  tibble::column_to_rownames(var = "taxonomy")
+
+s_meta <- data.frame(seq_id = names(s_otu_tab))
+s_meta <- s_meta %>%
+  dplyr::mutate(sampleNames_row = seq_id) %>%
+  tibble::column_to_rownames(var = "sampleNames_row")
+
+(ps_bracken_species <- phyloseq(sample_data(s_meta),
+                                otu_table(s_otu_tab, taxa_are_rows = TRUE),
+                                tax_table(as.matrix(s_tax_tab))))
+
+saveRDS(ps_bracken_species, "results/ps_objects/ps_bracken_species.rds")
+rm(list=ls())
+```
+
+### HUMAnN: pathway abundance phyloseq object
+```{r}
+s_abund <- read_tsv("data/pathabundance_relab_unstratified.tsv")
+
+s_tax_tab <- s_abund %>%
+  dplyr::rename("Pathway" = "# Pathway") %>%
+  dplyr::select(Pathway) %>%
+  dplyr::mutate(spec_row = Pathway) %>%
+  tibble::column_to_rownames(var = "spec_row")
+
+s_otu_tab <- s_abund %>%
+  dplyr::rename("Pathway" = "# Pathway") %>%
+  tibble::column_to_rownames(var = "Pathway")
+
+names(s_otu_tab) <- gsub(names(s_otu_tab), pattern = "_Abundance", replacement = "") 
+colSums(s_otu_tab)
+
+s_meta <- data.frame(seq_id = names(s_otu_tab))
+s_meta <- s_meta %>%
+  dplyr::mutate(sampleNames_row = seq_id) %>%
+  tibble::column_to_rownames(var = "sampleNames_row")
+
+(ps_metacyc_pathways <- phyloseq(sample_data(s_meta),
+                                otu_table(s_otu_tab, taxa_are_rows = TRUE),
+                                tax_table(as.matrix(s_tax_tab))))
+
+saveRDS(ps_metacyc_pathways, "results/ps_objects/ps_metacyc_pathways.rds")
+rm(list=ls())
+```
+
+### HUMAnN: EC phyloseq object
+```{r}
+s_abund <- read_tsv("data/ecs_relab_unstratified.tsv_with_names.tsv")
+
+s_tax_tab <- s_abund %>%
+  dplyr::rename("ECN" = "# Gene Family") %>%
+  dplyr::select(ECN) %>%
+  dplyr::mutate(spec_row = ECN) %>%
+  tibble::column_to_rownames(var = "spec_row")
+
+s_otu_tab <- s_abund %>%
+  dplyr::rename("ECN" = "# Gene Family") %>%
+  tibble::column_to_rownames(var = "ECN")
+
+names(s_otu_tab) <- gsub(names(s_otu_tab), pattern = "_Abundance-RPKs", replacement = "") 
+colSums(s_otu_tab)
+
+s_meta <- data.frame(seq_id = names(s_otu_tab))
+s_meta <- s_meta %>%
+  dplyr::mutate(sampleNames_row = seq_id) %>%
+  tibble::column_to_rownames(var = "sampleNames_row")
+
+(ps_enzymes <- phyloseq(sample_data(s_meta),
+                        otu_table(s_otu_tab, taxa_are_rows = TRUE),
+                        tax_table(as.matrix(s_tax_tab))))
+
+saveRDS(ps_enzymes, "results/ps_objects/ps_enzymes.rds")
+rm(list=ls())
+
+```
+
+### HUMAnN: gene families (uniref90) phyloseq object
+```{r}
+s_abund <- read_tsv("data/genefamilies_relab_unstratified_with_names.tsv")
+
+s_tax_tab <- s_abund %>%
+  dplyr::rename("UniRef90" = "# Gene Family") %>%
+  dplyr::select(UniRef90) %>%
+  dplyr::mutate(spec_row = UniRef90) %>%
+  tibble::column_to_rownames(var = "spec_row")
+
+s_otu_tab <- s_abund %>%
+  dplyr::rename("UniRef90" = "# Gene Family") %>%
+  tibble::column_to_rownames(var = "UniRef90")
+
+names(s_otu_tab) <- gsub(names(s_otu_tab), pattern = "_Abundance-RPKs", replacement = "") 
+colSums(s_otu_tab)
+
+s_meta <- data.frame(seq_id = names(s_otu_tab))
+s_meta <- s_meta %>%
+  dplyr::mutate(sampleNames_row = seq_id) %>%
+  tibble::column_to_rownames(var = "sampleNames_row")
+
+(ps_uniref90_families <- phyloseq(sample_data(s_meta),
+                                  otu_table(s_otu_tab, taxa_are_rows = TRUE),
+                                  tax_table(as.matrix(s_tax_tab))))
+
+saveRDS(ps_uniref90_families, "results/ps_objects/ps_uniref90_families.rds")
+rm(list=ls())
+```
+
+
