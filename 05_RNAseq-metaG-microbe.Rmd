@@ -1,0 +1,1209 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(stringr)
+library(pheatmap)
+library(ensembldb)
+library(biomaRt)
+library(ggpubr)
+library(tidyverse)
+library(foreach)
+library(DESeq2)
+library(data.table)
+library(dplyr)
+```
+
+--------------------------------------------------------------------------------
+SETUP
+--------------------------------------------------------------------------------
+
+Load interesting microbe lists
+```{r}
+microbe_lists <- readRDS("results/docs/microbe_lists.rds")
+```
+Import metadata
+```{r}
+genusspecies_clr_abundance <- read.csv("results/docs/genusspecies_clr_abundance.csv") %>%
+  dplyr::rename(SampleName=X)
+genusspecies_css_abundance <- read.csv("results/docs/genusspecies_css_abundance.csv") %>%
+  dplyr::rename(SampleName=X)
+
+genusspecies_clr_abundance_melt <- genusspecies_clr_abundance %>%
+  pivot_longer(
+    cols = -c("SampleName"),
+    names_to = "microbe",
+    values_to = "microbe_abundance_CLR"
+  ) %>%
+  mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) 
+
+genusspecies_css_abundance_melt <- genusspecies_css_abundance %>%
+  pivot_longer(
+    cols = -c("SampleName"),
+    names_to = "microbe",
+    values_to = "microbe_abundance_CSS"
+  ) %>%
+  mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) 
+
+meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
+  left_join(genusspecies_clr_abundance, by="SampleName") %>%
+  # Batch as character
+  mutate(Batch = as.character(Batch)) %>%
+  # exclude controls
+  dplyr::filter(!Luca_Lab_ID=="control") %>%
+  dplyr::filter(!SampleID==c("GMCC1S1", "GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
+  dplyr::filter(!SampleName=="4342XH")
+meta <- meta[order(row.names(meta)), ]
+```
+Choose microbe list for DE testing
+```{r}
+microbe_list <- unlist(microbe_lists[["diffabun_g"]]["all"])
+
+#covariates <- "Batch"
+# For interaction term
+covariates <- "Batch"
+
+microbe_covariates_list <- paste(covariates, microbe_list, sep = "+")
+#microbe_covariates_list <- paste(covariates, microbe_list, sep = "+")
+#microbe_covariates_list <- paste(microbe_covariates_list, "urbanism", sep = "+")
+#microbe_covariates_list <- paste(microbe_covariates_list, microbe_list, sep = ":")
+
+microbe_covariates_list <- paste("~", microbe_covariates_list) 
+
+names(microbe_covariates_list) <- unlist(microbe_lists[["diffabun_g"]]["all"])
+
+microbe_covariates_list <- lapply(microbe_covariates_list, function(x) as.formula(x))
+```
+
+
+
+
+NEW AS OF 11/8
+Load CLR-transformed abundances of microbes of interest
+```{r}
+# Read in CLR abundances of microbes
+DA_microbe_abundances <- read.csv("results/docs/DA_microbe_abundances.csv", row.names = 1)
+DA_microbe_abundances2 <- DA_microbe_abundances %>% rownames_to_column("SampleName")
+
+# Attach to metadata
+meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
+  left_join(DA_microbe_abundances2, by="SampleName") %>%
+  # Batch as character
+  mutate(Batch = as.character(Batch)) %>%
+  # exclude controls
+  dplyr::filter(!Luca_Lab_ID=="control") %>%
+  dplyr::filter(!SampleID==c("GMCC1S1", "GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
+  dplyr::filter(!SampleName=="4342XH")
+meta <- meta[order(row.names(meta)), ]
+
+DA_microbe_abundances2_melt <- DA_microbe_abundances2 %>%
+  pivot_longer(
+    cols = -c("SampleName"),
+    names_to = "microbe",
+    values_to = "microbe_abundance_CLR"
+  ) %>%
+  mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) 
+
+# Covariates
+covariates <- "Batch"
+microbe_covariates_list <- paste(covariates, colnames(DA_microbe_abundances), sep = "+")
+#microbe_covariates_list <- paste(covariates, microbe_list, sep = "+")
+#microbe_covariates_list <- paste(microbe_covariates_list, "urbanism", sep = "+")
+#microbe_covariates_list <- paste(microbe_covariates_list, microbe_list, sep = ":")
+
+microbe_covariates_list <- paste("~", microbe_covariates_list) 
+microbe_covariates_list <- lapply(microbe_covariates_list, function(x) as.formula(x))
+
+names(microbe_covariates_list) <- colnames(DA_microbe_abundances)
+```
+
+Load raw read counts
+```{r}
+raw_read_cts_filt <- read.csv("results/docs/raw_read_cts_filt.csv", row.names=1) 
+raw_read_cts_filt <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% meta$SampleID]
+raw_read_cts_filt <- raw_read_cts_filt[, order(colnames(raw_read_cts_filt))]
+```
+Separate into urban-only and rural-only
+```{r}
+meta_urban <- meta %>% dplyr::filter(urbanism=="urban")
+meta_urban <- meta_urban[order(row.names(meta_urban)), ]
+
+meta_rural <- meta %>% dplyr::filter(urbanism=="rural")
+meta_rural <- meta_rural[order(row.names(meta_rural)), ]
+
+raw_read_cts_filt_urban <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% meta_urban$SampleID]
+raw_read_cts_filt_urban <- raw_read_cts_filt_urban[, order(colnames(raw_read_cts_filt_urban))]
+
+raw_read_cts_filt_rural <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% meta_rural$SampleID]
+raw_read_cts_filt_rural <- raw_read_cts_filt_rural[, order(colnames(raw_read_cts_filt_rural))]
+```
+
+
+Option 1: Run locally
+
+Function for running DESeq using each formula as a design
+```{r}
+DESeq_func_generaspecies <- function(x,y,z){
+  DESeq(
+    DESeqDataSetFromMatrix(
+      countData = y,#raw_read_cts_filt,
+      colData = z, #meta,
+      design= x),
+      quiet=T # silences progress messages; easier to see progress bar in the loop
+  )}
+```
+
+First set up a parallel backend so the models can be run in parallel. 
+Source: https://www.blasbenito.com/post/02_parallelizing_loops_with_r/
+```{r}
+# Leave one core free for other tasks
+n.cores <- parallel::detectCores() - 1
+#create the cluster
+my.cluster <- parallel::makeCluster(
+  n.cores, 
+  type = "PSOCK",
+  outfile=""
+  )
+#register it to be used by %dopar%
+library(doParallel)
+doParallel::registerDoParallel(cl = my.cluster)
+```
+Iterate through every design when performing DESeq: output as individual DESeq objects in a list. Skip models that error. Although this loop is run in parallel, it still takes awhile. Other loops we run shouldn't need to be run in parallel.
+```{r}
+x <- microbe_covariates_list
+dds_list <- foreach(
+  i=seq_along(x),
+  .packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %dopar% {
+    tryCatch({
+      y <- DESeq_func_generaspecies(x[[i]], raw_read_cts_filt, meta)},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+    } 
+```
+Urban only
+```{r}
+x <- microbe_covariates_list
+dds_list_urban <- foreach(
+  i=seq_along(x),
+  .packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %dopar% {
+    tryCatch({
+      y <- DESeq_func_generaspecies(x[[i]], raw_read_cts_filt_urban, meta_urban)},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+    } 
+```
+
+Rural only
+```{r}
+x <- microbe_covariates_list
+dds_list_rural <- foreach(
+  i=seq_along(x),
+  .packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %dopar% {
+    tryCatch({
+      y <- DESeq_func_generaspecies(x[[i]], raw_read_cts_filt_rural, meta_rural)},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+    } 
+```
+```{r}
+# Save RDS object
+saveRDS(dds_list_urban, "results/rds/dds_list_urban.rds")
+saveRDS(dds_list_rural, "results/rds/dds_list_rural.rds")
+```
+
+
+
+Option 2: Run on HPC
+First save everything to file
+```{r}
+#saveRDS(DESeq_func_generaspecies, "data/for_hpc/DESeq_func_generaspecies.rds")
+#saveRDS(microbe_covariates_list, "data/for_hpc/microbe_covariates_list_CSS_BATCH.rds")
+#saveRDS(raw_read_cts_filt, "data/for_hpc/raw_read_cts_filt.rds")
+#saveRDS(meta, "data/for_hpc/meta_CSS.rds")
+```
+rsync every .rds file in the for_hpc folder (can run directly from here)
+```{bash}
+scp -r data/for_hpc/*.rds sjarif@midway3.rcc.uchicago.edu:gmbc_colonocytes/05_RNAseq-metaG-microbe/data/
+```
+Now create R script and save
+```{R}
+library(DESeq2)
+library(tidyverse)
+library(foreach)
+library(doParallel)
+
+# make sure this is same as number of cpus requested
+registerDoParallel(cores=8)
+
+DESeq_func_generaspecies <- readRDS("../data/DESeq_func_generaspecies.rds")
+microbe_covariates_list <- readRDS("../data/microbe_covariates_list.rds")
+raw_read_cts_filt <- readRDS("../data/raw_read_cts_filt.rds")
+meta <- readRDS("../data/meta.rds")
+
+
+x <- microbe_covariates_list
+dds_list <- foreach(
+  i=seq_along(x),
+  .packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %dopar% {
+    tryCatch({
+      y <- DESeq_func_generaspecies(x[[i]], raw_read_cts_filt, meta)},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  } 
+  
+saveRDS(dds_list, "dds_list.rds")
+```
+Create bash file to run R script
+```{bash}
+#!/bin/bash      
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=60g
+#SBATCH -p blekhman
+#SBATCH --account pi-blekhman
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sjarif@uchicago.edu
+
+cd /home/sjarif/gmbc_colonocytes/05_RNAseq-metaG-microbe/results
+
+# Load the necessary modules if needed
+module load R
+
+# Run the R script using Rscript
+Rscript ../code/dds.R
+```
+Check the resources that were used. According to this it took 12 minutes and used at max 16G RAM
+```{bash}
+# JUST AN EXAMPLE
+sacct -j 9894616 --format=JobID,JobName,MaxRSS,Elapsed,UserCPU
+```
+Download and proceed as normal (better to run this in terminal from local drive so you can see progress)
+```{bash}
+scp -r sjarif@midway3.rcc.uchicago.edu:gmbc_colonocytes/05_RNAseq-metaG-microbe/results/dds_list_CLR_BATCH_URBANISM.rds /Users/sabri/Documents/GitHub/gmbc-colonocytes/results/rds
+
+scp -r sjarif@midway3.rcc.uchicago.edu:gmbc_colonocytes/05_RNAseq-metaG-microbe/results/dds_list_CSS_BATCH_URBANISM.rds /Users/sabri/Documents/GitHub/gmbc-colonocytes/results/rds
+
+scp -r sjarif@midway3.rcc.uchicago.edu:gmbc_colonocytes/05_RNAseq-metaG-microbe/results/dds_list_CLR_BATCH_URBANISM_INTERACTION.rds /Users/sabri/Documents/GitHub/gmbc-colonocytes/results/rds
+
+scp -r sjarif@midway3.rcc.uchicago.edu:gmbc_colonocytes/05_RNAseq-metaG-microbe/results/dds_list_CSS_BATCH_URBANISM_INTERACTION.rds /Users/sabri/Documents/GitHub/gmbc-colonocytes/results/rds
+```
+
+
+
+
+
+
+
+
+
+
+
+Back to local
+```{r}
+dds_list_urban <- readRDS("results/rds/dds_list_urban.rds")
+dds_list_rural <- readRDS("results/rds/dds_list_rural.rds")
+```
+```{r}
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+
+# Convert DESeq results into table
+res2table <- function(ddsobject){
+  results(ddsobject)  %>%
+  as.data.frame() %>%
+  rownames_to_column("ensembl_gene_id") }
+
+# Define annotations
+att_interest <- c("ensembl_gene_id", "description", "hgnc_symbol") #"ensembl_transcript_id", 
+
+# Annotate 
+annotate_ensembl <- function(resdf){biomaRt::getBM(
+  attributes = att_interest, 
+  filters = "ensembl_gene_id",
+  values = resdf$ensembl_gene_id, 
+  mart = ensembl) %>%
+  left_join(resdf, by="ensembl_gene_id")
+}
+```
+Loop through list of DESeq objects and generate result tables
+```{r}
+dds_list_filt <- Filter(Negate(is.null), dds_list)
+
+x <- dds_list_filt
+res_list <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <- res2table(x[[i]])},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+```
+Urban only
+```{r}
+dds_list_filt_urban <- Filter(Negate(is.null), dds_list_urban)
+
+x <- dds_list_filt_urban
+res_list_urban <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <- res2table(x[[i]])},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+```
+
+Rural only
+```{r}
+dds_list_filt_rural <- Filter(Negate(is.null), dds_list_rural)
+
+x <- dds_list_filt_rural
+res_list_rural <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <- res2table(x[[i]])},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+```
+
+Filter for genes with an FDR <= 0.1
+```{r}
+x <- res_list
+sig_list <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::filter(x[[i]], padj < 0.1 ) 
+      #%>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+sig_list_filt <- Filter(NROW, sig_list)
+```
+Urban only
+```{r}
+x <- res_list_urban
+sig_list_urban <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::filter(x[[i]], padj < 0.1 ) 
+      #%>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+sig_list_filt_urban <- Filter(NROW, sig_list_urban)
+```
+Rural only
+```{r}
+x <- res_list_rural
+sig_list_rural <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::filter(x[[i]], padj < 0.1 ) 
+      #%>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+sig_list_filt_rural <- Filter(NROW, sig_list_rural)
+```
+
+Append model name to each dataframe
+```{r}
+x <- sig_list_filt
+sig_list_filt_names <- foreach(
+  i=seq_along(x),
+  n=names(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::mutate(x[[i]], microbe = n) %>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+```
+Urban only
+```{r}
+x <- sig_list_filt_urban
+sig_list_filt_names_urban <- foreach(
+  i=seq_along(x),
+  n=names(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::mutate(x[[i]], microbe = n) %>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+```
+Rural only
+```{r}
+x <- sig_list_filt_rural
+sig_list_filt_names_rural <- foreach(
+  i=seq_along(x),
+  n=names(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::mutate(x[[i]], microbe = n) %>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+```
+
+Flatten this list of dfs
+```{r}
+sig_list_df <- bind_rows(sig_list_filt_names) %>%
+  dplyr::select(ensembl_gene_id, microbe, everything()) %>%
+  mutate(l2fc_dir = case_when(log2FoldChange > 0 ~ "U",
+                               log2FoldChange < 0 ~ "D")) #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+```
+
+Urban only
+```{r}
+sig_list_df_urban <- bind_rows(sig_list_filt_names_urban) %>%
+  dplyr::select(ensembl_gene_id, microbe, everything()) %>%
+  mutate(l2fc_dir = case_when(log2FoldChange > 0 ~ "U",
+                               log2FoldChange < 0 ~ "D")) #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+```
+Rural only
+```{r}
+sig_list_df_rural <- bind_rows(sig_list_filt_names_rural) %>%
+  dplyr::select(ensembl_gene_id, microbe, everything()) %>%
+  mutate(l2fc_dir = case_when(log2FoldChange > 0 ~ "U",
+                               log2FoldChange < 0 ~ "D")) #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+```
+
+
+Summary df: rows are microbes
+```{r}
+# New df; fill will empty rows that correspond to number of models
+sig_list_summary <- data.frame(n_genes=numeric(0)) 
+sig_list_summary[nrow(sig_list_summary)+length(sig_list_filt),] <- NA
+# Assign rownames based on sigres_list
+rownames(sig_list_summary) <- names(sig_list_filt)
+sig_list_summary$microbe <- row.names(sig_list_summary)
+# Loop through each sig list
+sig_list_summary$n_genes <- as.numeric(lapply(sig_list_filt, function(x) length(unique(x[["ensembl_gene_id"]]))))
+# list unique gene IDs
+sig_list_summary$genes <- lapply(sig_list_filt, function(x) str_c(unique(x[["ensembl_gene_id"]]), collapse = ";"))
+
+# Step 1: Merge generaspecies_sig_list_summary with sig_list_df to obtain log2FoldChange values
+merged_df <- merge(sig_list_summary, sig_list_df, by = "microbe")
+
+# Step 2: Group the merged dataframe by "model" and "ensembl_gene_id" and count the number of genes that are upregulated and downregulated
+#detach(package:plyr)
+counts_df <- merged_df %>%
+  group_by(microbe) %>%
+  summarise(n_U = sum(l2fc_dir == "U"),
+            n_D = sum(l2fc_dir == "D")) 
+
+# Step 4: Merge the summary dataframe with generaspecies_sig_list_summary to add the n_U and n_D columns
+sig_list_summary <- merge(sig_list_summary, counts_df, by = "microbe") #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+
+```
+Urban only
+```{r}
+# New df; fill will empty rows that correspond to number of models
+sig_list_summary_urban <- data.frame(n_genes=numeric(0)) 
+sig_list_summary_urban[nrow(sig_list_summary_urban)+length(sig_list_filt_urban),] <- NA
+# Assign rownames based on sigres_list
+rownames(sig_list_summary_urban) <- names(sig_list_filt_urban)
+sig_list_summary_urban$microbe <- row.names(sig_list_summary_urban)
+# Loop through each sig list
+sig_list_summary_urban$n_genes <- as.numeric(lapply(sig_list_filt_urban, function(x) length(unique(x[["ensembl_gene_id"]]))))
+# list unique gene IDs
+sig_list_summary_urban$genes <- lapply(sig_list_filt_urban, function(x) str_c(unique(x[["ensembl_gene_id"]]), collapse = ";"))
+
+# Step 1: Merge generaspecies_sig_list_summary with sig_list_df to obtain log2FoldChange values
+merged_df_urban <- merge(sig_list_summary_urban, sig_list_df_urban, by = "microbe")
+
+# Step 2: Group the merged dataframe by "model" and "ensembl_gene_id" and count the number of genes that are upregulated and downregulated
+#detach(package:plyr)
+counts_df_urban <- merged_df_urban %>%
+  group_by(microbe) %>%
+  summarise(n_U = sum(l2fc_dir == "U"),
+            n_D = sum(l2fc_dir == "D")) 
+
+# Step 4: Merge the summary dataframe with generaspecies_sig_list_summary to add the n_U and n_D columns
+sig_list_summary_urban <- merge(sig_list_summary_urban, counts_df_urban, by = "microbe") #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                # microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+
+```
+Rural only
+```{r}
+# New df; fill will empty rows that correspond to number of models
+sig_list_summary_rural <- data.frame(n_genes=numeric(0)) 
+sig_list_summary_rural[nrow(sig_list_summary_rural)+length(sig_list_filt_rural),] <- NA
+# Assign rownames based on sigres_list
+rownames(sig_list_summary_rural) <- names(sig_list_filt_rural)
+sig_list_summary_rural$microbe <- row.names(sig_list_summary_rural)
+# Loop through each sig list
+sig_list_summary_rural$n_genes <- as.numeric(lapply(sig_list_filt_rural, function(x) length(unique(x[["ensembl_gene_id"]]))))
+# list unique gene IDs
+sig_list_summary_rural$genes <- lapply(sig_list_filt_rural, function(x) str_c(unique(x[["ensembl_gene_id"]]), collapse = ";"))
+
+# Step 1: Merge generaspecies_sig_list_summary with sig_list_df to obtain log2FoldChange values
+merged_df_rural <- merge(sig_list_summary_rural, sig_list_df_rural, by = "microbe")
+
+# Step 2: Group the merged dataframe by "model" and "ensembl_gene_id" and count the number of genes that are upregulated and downregulated
+#detach(package:plyr)
+counts_df_rural <- merged_df_rural %>%
+  group_by(microbe) %>%
+  summarise(n_U = sum(l2fc_dir == "U"),
+            n_D = sum(l2fc_dir == "D")) 
+
+# Step 4: Merge the summary dataframe with generaspecies_sig_list_summary to add the n_U and n_D columns
+sig_list_summary_rural <- merge(sig_list_summary_rural, counts_df_rural, by = "microbe") #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                # microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+
+```
+
+
+Summary df: rows are genes
+```{r}
+gene_list_summary <- sig_list_df %>%
+  group_by(hgnc_symbol) %>%
+  summarise(
+    n_microbes = n(),
+            urban_U = sum(DA_urbanism == "urban" & l2fc_dir=="U"),
+            urban_D = sum(DA_urbanism == "urban" & l2fc_dir=="D"),
+            rural_U = sum(DA_urbanism == "rural" & l2fc_dir=="U"),
+            rural_D= sum(DA_urbanism == "rural" & l2fc_dir=="D"))
+
+gene_list_summary_plot <- gene_list_summary %>%
+  mutate(hgnc_symbol = factor(hgnc_symbol, levels = unique(hgnc_symbol))) %>%
+  #dplyr::filter(n_microbes >= 10) %>%
+  pivot_longer(cols = c(urban_U, urban_D, rural_U, rural_D),
+               names_to = c("DA_urbanism", "l2fc_dir"),
+               names_pattern = "(.*?)_(.*)",
+               values_to = "count")
+```
+Urban only
+```{r}
+gene_list_summary_urban <- sig_list_df_urban %>%
+  group_by(hgnc_symbol) %>%
+  summarise(
+    n_microbes = n(),
+            urban_U = sum(DA_urbanism == "urban" & l2fc_dir=="U"),
+            urban_D = sum(DA_urbanism == "urban" & l2fc_dir=="D"),
+            rural_U = sum(DA_urbanism == "rural" & l2fc_dir=="U"),
+            rural_D= sum(DA_urbanism == "rural" & l2fc_dir=="D"))
+
+gene_list_summary_plot_urban <- gene_list_summary_urban %>%
+  mutate(hgnc_symbol = factor(hgnc_symbol, levels = unique(hgnc_symbol))) %>%
+  #dplyr::filter(n_microbes >= 10) %>%
+  pivot_longer(cols = c(urban_U, urban_D, rural_U, rural_D),
+               names_to = c("DA_urbanism", "l2fc_dir"),
+               names_pattern = "(.*?)_(.*)",
+               values_to = "count")
+```
+Rural only
+```{r}
+gene_list_summary_rural <- sig_list_df_rural %>%
+  group_by(hgnc_symbol) %>%
+  summarise(
+    n_microbes = n(),
+            urban_U = sum(DA_urbanism == "urban" & l2fc_dir=="U"),
+            urban_D = sum(DA_urbanism == "urban" & l2fc_dir=="D"),
+            rural_U = sum(DA_urbanism == "rural" & l2fc_dir=="U"),
+            rural_D= sum(DA_urbanism == "rural" & l2fc_dir=="D"))
+
+gene_list_summary_plot_rural <- gene_list_summary_rural %>%
+  mutate(hgnc_symbol = factor(hgnc_symbol, levels = unique(hgnc_symbol))) %>%
+  #dplyr::filter(n_microbes >= 10) %>%
+  pivot_longer(cols = c(urban_U, urban_D, rural_U, rural_D),
+               names_to = c("DA_urbanism", "l2fc_dir"),
+               names_pattern = "(.*?)_(.*)",
+               values_to = "count")
+```
+
+```{r}
+gene_list_summary_plot <- gene_list_summary_plot %>%
+  dplyr::arrange(n_microbes, hgnc_symbol) 
+
+gene_list_summary_plot$hgnc_symbol <- factor(gene_list_summary_plot$hgnc_symbol, levels = unique(gene_list_summary_plot$hgnc_symbol))
+
+ggplot(dplyr::filter(gene_list_summary_plot, gene_list_summary_plot$l2fc_dir=="U"), aes(x = DA_urbanism, y = hgnc_symbol, color=DA_urbanism)) + 
+  geom_point(aes(size = ifelse(count == 0, NA, count))) +
+  scale_size_continuous(limits = c(0, 50)) +
+  labs(size = "Number of microbes") + # Optional: Label for the size legend
+  scale_color_manual(values=c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(~l2fc_dir) +
+  theme_minimal() +
+  scale_x_discrete(labels = c("Rural", "Urban")) +
+  theme(strip.background = element_blank(),
+        #strip.text = element_blank(),
+        axis.text.y = element_text(face = "italic", hjust=0.5),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.spacing = unit(0.2, "cm"))
+#ggsave("results/figs/RNAseq-metaG-microbe/gene_diffabun_heatmap_U.png", width=3, height=6)
+
+ggplot(dplyr::filter(gene_list_summary_plot, gene_list_summary_plot$l2fc_dir=="D"), aes(x = DA_urbanism, y = hgnc_symbol, color=DA_urbanism)) + 
+  geom_point(aes(size = ifelse(count == 0, NA, count))) +
+  scale_size_continuous(limits = c(0, 50)) +
+  labs(size = "Number of microbes") + # Optional: Label for the size legend
+  scale_color_manual(values=c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(~l2fc_dir) +
+  theme_minimal() +
+  scale_x_discrete(labels = c("Rural", "Urban")) +
+  theme(strip.background = element_blank(),
+        #strip.text = element_blank(),
+        axis.text.y = element_text(face = "italic", hjust=0.5),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.spacing = unit(0.2, "cm"))
+#ggsave("results/figs/RNAseq-metaG-microbe/gene_diffabun_heatmap_D.png", width=3, height=6)
+```
+
+How to derive residuals: https://support.bioconductor.org/p/60567/
+```{r}
+# Extract the residuals (batch and total.reads corrected counts)
+x <- dds_list_filt
+residuals <- foreach(
+  i=seq_along(x),
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      fitted.common.scale = t(t(assays(x[[i]])[["mu"]])/sizeFactors(x[[i]]))
+      y <-  counts(x[[i]], normalized=T) - fitted.common.scale
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+# Filter for microbes of interest
+residuals_filt1 <- residuals[names(sig_list_filt_names)]
+
+# Bind the matching sig_list_filt
+combine_function <- function(item1, item2) {
+  new_item <- list(residuals = item1, sig_results = item2)
+  return(new_item)
+}
+residuals_paired <- Map(combine_function, residuals_filt1, sig_list_filt_names)
+
+# function to filter by significant genes
+filter_residuals <- function(residuals, sig_results) {
+  filtered_residuals <- residuals[sig_results$ensembl_gene_id, , drop = FALSE]
+  return(filtered_residuals)
+}
+
+# Use lapply to filter the "residuals" sub-element and retain "sig_results"
+residuals_filt2 <- lapply(residuals_paired, function(paired_element) {
+  filtered_residuals <- filter_residuals(paired_element$residuals, paired_element$sig_results) %>% 
+    as.data.frame() %>% 
+    rownames_to_column("ensembl_gene_id") %>%
+    left_join(paired_element$sig_results[c("ensembl_gene_id", "microbe", "hgnc_symbol")], by="ensembl_gene_id") %>%
+    mutate(microbe_gene = paste(microbe, hgnc_symbol, sep = ";")) 
+  paired_element$residuals <- filtered_residuals  # Update the "residuals" sub-element
+  return(paired_element$residuals)  # Return the modified element with "sig_results" intact
+})
+
+residuals_rbind <- as.data.frame(do.call(rbind, residuals_filt2)) %>%
+  dplyr::select(microbe_gene, everything())
+
+residuals_melt <- residuals_rbind  %>%
+  pivot_longer(
+    cols = -c("microbe_gene", "ensembl_gene_id", "microbe", "hgnc_symbol"),
+    names_to = "SampleID",
+    values_to = "residual_gene_count"
+  ) %>%
+  left_join(meta[c("SampleName", "SampleID")], by = "SampleID") %>%
+  mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) %>%
+  left_join(DA_microbe_abundances2_melt[c("SampleName_microbe", "microbe_abundance_CLR")], by="SampleName_microbe") %>%
+  dplyr::select(c("microbe_gene", "microbe_abundance_CLR", "residual_gene_count"))
+```
+Urban only
+```{r}
+# Extract the residuals (batch and total.reads corrected counts)
+x <- dds_list_filt_urban
+residuals_urban <- foreach(
+  i=seq_along(x),
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      fitted.common.scale = t(t(assays(x[[i]])[["mu"]])/sizeFactors(x[[i]]))
+      y <-  counts(x[[i]], normalized=T) - fitted.common.scale
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+# Filter for microbes of interest
+residuals_filt1_urban <- residuals_urban[names(sig_list_filt_names_urban)]
+
+# Bind the matching sig_list_filt
+combine_function <- function(item1, item2) {
+  new_item <- list(residuals = item1, sig_results = item2)
+  return(new_item)
+}
+residuals_paired_urban <- Map(combine_function, residuals_filt1_urban, sig_list_filt_names_urban)
+
+# function to filter by significant genes
+filter_residuals <- function(residuals, sig_results) {
+  filtered_residuals <- residuals[sig_results$ensembl_gene_id, , drop = FALSE]
+  return(filtered_residuals)
+}
+
+# Use lapply to filter the "residuals" sub-element and retain "sig_results"
+residuals_filt2_urban <- lapply(residuals_paired_urban, function(paired_element) {
+  filtered_residuals <- filter_residuals(paired_element$residuals, paired_element$sig_results) %>% 
+    as.data.frame() %>% 
+    rownames_to_column("ensembl_gene_id") %>%
+    left_join(paired_element$sig_results[c("ensembl_gene_id", "microbe", "hgnc_symbol")], by="ensembl_gene_id") %>%
+    mutate(microbe_gene = paste(microbe, hgnc_symbol, sep = ";")) 
+  paired_element$residuals <- filtered_residuals  # Update the "residuals" sub-element
+  return(paired_element$residuals)  # Return the modified element with "sig_results" intact
+})
+
+residuals_rbind_urban <- as.data.frame(do.call(rbind, residuals_filt2_urban)) %>%
+  dplyr::select(microbe_gene, everything())
+
+residuals_melt_urban <- residuals_rbind_urban  %>%
+  pivot_longer(
+    cols = -c("microbe_gene", "ensembl_gene_id", "microbe", "hgnc_symbol"),
+    names_to = "SampleID",
+    values_to = "residual_gene_count"
+  ) %>%
+  left_join(meta_urban[c("SampleName", "SampleID")], by = "SampleID") %>%
+  mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) %>%
+  left_join(DA_microbe_abundances2_melt[c("SampleName_microbe", "microbe_abundance_CLR")], by="SampleName_microbe") %>%
+  dplyr::select(c("microbe_gene", "microbe_abundance_CLR", "residual_gene_count"))
+```
+Rural only
+```{r}
+# Extract the residuals (batch and total.reads corrected counts)
+x <- dds_list_filt_rural
+residuals_rural <- foreach(
+  i=seq_along(x),
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      fitted.common.scale = t(t(assays(x[[i]])[["mu"]])/sizeFactors(x[[i]]))
+      y <-  counts(x[[i]], normalized=T) - fitted.common.scale
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+# Filter for microbes of interest
+residuals_filt1_rural <- residuals_rural[names(sig_list_filt_names_rural)]
+
+# Bind the matching sig_list_filt
+combine_function <- function(item1, item2) {
+  new_item <- list(residuals = item1, sig_results = item2)
+  return(new_item)
+}
+residuals_paired_rural <- Map(combine_function, residuals_filt1_rural, sig_list_filt_names_rural)
+
+# function to filter by significant genes
+filter_residuals <- function(residuals, sig_results) {
+  filtered_residuals <- residuals[sig_results$ensembl_gene_id, , drop = FALSE]
+  return(filtered_residuals)
+}
+
+# Use lapply to filter the "residuals" sub-element and retain "sig_results"
+residuals_filt2_rural <- lapply(residuals_paired_rural, function(paired_element) {
+  filtered_residuals <- filter_residuals(paired_element$residuals, paired_element$sig_results) %>% 
+    as.data.frame() %>% 
+    rownames_to_column("ensembl_gene_id") %>%
+    left_join(paired_element$sig_results[c("ensembl_gene_id", "microbe", "hgnc_symbol")], by="ensembl_gene_id") %>%
+    mutate(microbe_gene = paste(microbe, hgnc_symbol, sep = ";")) 
+  paired_element$residuals <- filtered_residuals  # Update the "residuals" sub-element
+  return(paired_element$residuals)  # Return the modified element with "sig_results" intact
+})
+
+residuals_rbind_rural <- as.data.frame(do.call(rbind, residuals_filt2_rural)) %>%
+  dplyr::select(microbe_gene, everything())
+
+residuals_melt_rural <- residuals_rbind_rural  %>%
+  pivot_longer(
+    cols = -c("microbe_gene", "ensembl_gene_id", "microbe", "hgnc_symbol"),
+    names_to = "SampleID",
+    values_to = "residual_gene_count"
+  ) %>%
+  left_join(meta_rural[c("SampleName", "SampleID")], by = "SampleID") %>%
+  mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) %>%
+  left_join(DA_microbe_abundances2_melt[c("SampleName_microbe", "microbe_abundance_CLR")], by="SampleName_microbe") %>%
+  dplyr::select(c("microbe_gene", "microbe_abundance_CLR", "residual_gene_count"))
+```
+
+
+```{r}
+library(shiny)
+
+# Assuming you have already loaded your data into 'residuals_melt'
+
+# Define the UI
+ui <- fluidPage(
+  titlePanel("Batch + Microbe"),
+  mainPanel(
+    plotOutput("dotplot"),
+    fluidRow(
+      column(4, selectInput("gene_selector", "Select microbe_gene:", choices = unique(residuals_melt_rural$microbe_gene))), #CHANGE HERE
+      column(4, actionButton("prev_plot", "Previous Plot")),
+      column(4, actionButton("next_plot", "Next Plot"))
+    )
+  )
+)
+
+# Define the server
+server <- function(input, output, session) {
+  # Create a list of unique microbe_gene values
+  unique_genes <- unique(residuals_melt_rural$microbe_gene) # AND HERE
+  
+  # Initialize a reactive value to keep track of the current index
+  current_gene_index <- reactiveVal(1)
+  
+  # Create a reactive data subset based on the current index
+  selected_data <- reactive({
+    dplyr::filter(residuals_melt_rural, microbe_gene == unique_genes[current_gene_index()]) #AND HERE
+  })
+  
+  # Create the dotplot
+  output$dotplot <- renderPlot({
+    ggplot(selected_data(), aes(x = microbe_abundance_CLR, y = residual_gene_count)) +
+      geom_point() +
+      geom_smooth(method = "lm") +
+      facet_wrap(~microbe_gene, scales = "free") +
+      ggtitle(paste("Dotplot for", unique_genes[current_gene_index()]))
+  })
+  
+  # Define an observer for the "Next Plot" button
+  observeEvent(input$next_plot, {
+    # Increment the index to display the next plot
+    current_gene_index(current_gene_index() + 1)
+    
+    # Wrap back to the first plot if all plots have been shown
+    if (current_gene_index() > length(unique_genes)) {
+      current_gene_index(1)
+    }
+  })
+  
+  # Define an observer for the "Previous Plot" button
+  observeEvent(input$prev_plot, {
+    # Decrement the index to display the previous plot
+    current_gene_index(current_gene_index() - 1)
+    
+    # Wrap to the last plot if going back from the first plot
+    if (current_gene_index() < 1) {
+      current_gene_index(length(unique_genes))
+    }
+  })
+  
+  # Update the dropdown menu based on the current index
+  observe({
+    updateSelectInput(session, "gene_selector", selected = unique_genes[current_gene_index()])
+  })
+}
+
+# Run the Shiny app
+shinyApp(ui, server)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+melted_gssls <- sig_list_summary %>%
+  dplyr::filter(n_genes > 10) %>%
+  # I am suspicious of this microbe, removing for now
+  dplyr::filter(!microbe=="Hungatella_hathewayi") %>%
+  pivot_longer(cols = c("n_U", "n_D"),
+                          names_to = "l2fc_dir",
+                          values_to = "n_l2fc_dir") %>%
+  mutate(color = case_when(DA_urbanism == "rural" ~ "#6FBD8B", 
+                           DA_urbanism == "urban" ~ "#7B2BC1")) %>%
+  # First sort by number of host genes, then sort by urbanism to get colors right
+  dplyr::arrange(DA_urbanism, n_genes, microbe)
+melted_gssls$microbe <- factor(melted_gssls$microbe, levels = unique(melted_gssls$microbe))
+
+ggplot(melted_gssls, aes(x = l2fc_dir, y = microbe)) + 
+ geom_point(aes(size = ifelse(n_l2fc_dir == 0, NA, n_l2fc_dir)), shape=18) +
+  scale_size_continuous(limits = c(0, 150)) +
+  labs(size = "Number of host genes") + 
+  labs(x = "Direction of\nDGE in host", fill = "# significant\nDE host genes") +
+  #facet_grid(DA_urbanism ~ ., scales="free", space="free") +
+  theme_minimal() +
+  theme(strip.background = element_blank(),
+        strip.text = element_blank(),
+        axis.text.y = element_text(face = "italic", color=melted_gssls$color),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),
+        panel.spacing = unit(0.2, "cm")) 
+
+#ggsave("results/figs/RNAseq-metaG-microbe/microbe_diffabun_heatmap.png", width=4.2, height=6)
+```
+Large heatmap
+Filter for genes identified as unique 
+```{r}
+x <- res_list_int
+heatmap_list <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::filter(x[[i]], ensembl_gene_id %in% unique(sig_list_df_int$ensembl_gene_id)) %>%
+        mutate(microbe = names(x)[i])
+      #%>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+heatmap_list <- heatmap_list[names(heatmap_list) %in% names(sig_list_filt_int)]
+
+heatmap_list <- bind_rows(heatmap_list) %>%
+  mutate(l2fc_sign = case_when(log2FoldChange > 0 ~ "up",
+                               log2FoldChange < 0 ~ "down")) %>%
+  mutate(l2fc_abs = abs(log2FoldChange)) %>%
+  mutate(log2_l2fc_abs = log2(l2fc_abs)) %>%
+  mutate(log2_l2fc = case_when(l2fc_sign == "up" ~ log2_l2fc_abs,
+                               l2fc_sign == "down" ~ log2_l2fc_abs * -1)) %>%
+  mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                 microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+```
+```{r}
+heatmap_plot <- heatmap_list %>%
+  dplyr::select(ensembl_gene_id, microbe, log2FoldChange) %>%
+  pivot_wider(names_from = microbe, values_from = log2FoldChange) %>%
+  column_to_rownames("ensembl_gene_id") %>%
+  as.matrix()
+
+col_colors <- ifelse(colnames(heatmap_plot) %in% unlist(microbe_lists[["diffabun_g"]]["rural"]), "#6FBD8B", "#7B2BC1")
+
+# Update the heatmap function with cluster information
+heatmap(heatmap_plot,
+        ColSideColors = col_colors,
+        col = rainbow(100))
+
+legend(x="bottomright", legend=c("min", "ave", "max"), 
+     fill=rainbow(3))
+```
+```{r}
+library(ComplexHeatmap)
+library(colorRamp2)
+
+set.seed(123)
+hm_2 <- ComplexHeatmap::Heatmap(heatmap_plot, row_km = 2)
+hm_3 <- ComplexHeatmap::Heatmap(heatmap_plot, row_km = 3)
+
+colname_hm_2 = unlist(hm_2@column_names_param["labels"])
+colname_hm_3 = unlist(hm_3@column_names_param["labels"])
+
+colcolor_hm_2 <- ifelse(colname_hm_2 %in% unlist(microbe_lists[["diffabun_g"]]["rural"]), "Rural", "Urban")
+colcolor_hm_3 <- ifelse(colname_hm_3 %in% unlist(microbe_lists[["diffabun_g"]]["rural"]), "Rural", "Urban")
+
+anno_hm_2 <- HeatmapAnnotation(Urbanism = colcolor_hm_2, 
+                               col = list(colcolor_hm_2 = c("Rural" = "#6FBD8B", "Urban" = "#7B2BC1")))
+anno_hm_3 <- HeatmapAnnotation(Urbanism = colcolor_hm_3, 
+                               col = list(colcolor_hm_3 = c("Rural" = "#6FBD8B", "Urban" = "#7B2BC1")))
+
+hm_2@row_names_param["show"] <- FALSE
+hm_2@column_names_param["show"] <- FALSE
+hm_2@top_annotation <- anno_hm_2
+hm_2
+
+hm_3@row_names_param["show"] <- FALSE
+hm_3@column_names_param["show"] <- FALSE
+hm_3@top_annotation <- anno_hm_3
+hm_3
+```
+Functional analysis: select all genes
+```{r}
+library(clipr)
+write_clip(gene_list_summary$hgnc_symbol)
+```
+
+
+Functional analysis: select genes grouped by k-means
+```{r}
+replace_with_row_names <- function(indices, matrix) {
+  row_names <- rownames(matrix)
+  row_names[indices]
+}
+
+k2_index <- row_order(hm_2)
+k2_gene <- lapply(k2_index, replace_with_row_names, matrix = heatmap_plot)
+
+k3_index <- row_order(hm_3)
+k3_gene <- lapply(k3_index, replace_with_row_names, matrix = heatmap_plot)
+```
+
+
+```{r}
+library(biomaRt)
+library(clusterProfiler)
+
+# Create a biomart object for Ensembl and UniProt databases
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Function to convert Ensembl IDs to UniProt IDs
+convert_ensembl_to_symbol <- function(ensembl_ids) {
+  ensembl_to_uniprot <- getBM(filters = "ensembl_gene_id",
+                             values = ensembl_ids,
+                             mart = ensembl,
+                             attributes = c("ensembl_gene_id", "uniprot_gn_symbol", "uniprot_gn_id", "entrezgene_id"))
+  ensembl_to_uniprot
+}
+
+# Apply the function to the nested list
+k2_symbol <- lapply(k2_gene, convert_ensembl_to_symbol)
+
+uni <- res_list[[1]]$ensembl_gene_id
+uni <- convert_ensembl_to_symbol(uni)
+```
+
+```{r}
+uni_uniprot <- unlist(list(uni$uniprot_gn_id))
+
+# k=2 
+
+kegg_k2_1 <- enrichKEGG(gene  = unlist(list(k2_symbol[[1]]$uniprot_gn_id)),
+                      universe = uni_uniprot,
+                      keyType = "uniprot",
+                      organism     = 'hsa',
+                      pvalueCutoff = 0.1)
+kegg_k2_1_res <- kegg_k2_1@result
+kegg_k2_1_sig <- kegg_k2_1_res %>% dplyr::filter(p.adjust < 0.1)
+```
+
+```{r}
+cnetplot(kegg_k2_1, categorySize="p.adjust", foldChange=unlist(list(k2_symbol[[1]]$uniprot_gn_symbol)))
+#ggsave("Downloads/kegg_cnet.png", width=10, height=10)
+```
+```{r}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+go_k2_1 <- enrichGO(gene  = unlist(list(k2_symbol[[1]]$ensembl_gene_id)),
+                    universe = res_list[[1]]$ensembl_gene_id,
+                    OrgDb  = org.Hs.eg.db,
+                    keyType       = 'ENSEMBL',
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
+
+go_k2_1_res <- go_k2_1@result
+go_k2_1_res <- go_k2_1_res %>%
+  mutate(GeneRatio_Split = strsplit(GeneRatio, "/")) %>%
+  mutate(GeneRatio_Numerator = sapply(GeneRatio_Split, function(x) as.numeric(x[1]))) %>%
+  mutate(GeneRatio_Denominator = sapply(GeneRatio_Split, function(x) as.numeric(x[2]))) %>%
+  mutate(GeneRatio_Percentage = GeneRatio_Numerator / GeneRatio_Denominator) %>%
+  mutate(BgRatio_Split = strsplit(BgRatio, "/")) %>%
+  mutate(BgRatio_Numerator = sapply(BgRatio_Split, function(x) as.numeric(x[1]))) %>%
+  mutate(BgRatio_Denominator = sapply(BgRatio_Split, function(x) as.numeric(x[2]))) %>%
+  mutate(BgRatio_Percentage = BgRatio_Numerator / BgRatio_Denominator) %>%
+  select(-GeneRatio_Numerator, -GeneRatio_Denominator, -GeneRatio_Split, -BgRatio_Numerator, -BgRatio_Denominator, -BgRatio_Split)
+
+
+go_k2_1_sig <- go_k2_1_res %>% dplyr::filter(p.adjust < 0.1)
+```
+
+```{r}
+goplot(go_k2_1)
+```
+```{r}
+cnetplot(go_k2_1, categorySize="p.adjust", foldChange=unlist(list(k2_symbol[[1]]$uniprot_gn_symbol)))
+#ggsave("Downloads/go_cnet.png", width=10, height=10)
+```
+
+```{r}
+dotplot(go_k2_1)
+```
+
+
+
+
+
+```{r}
+library(ReactomePA)
+
+uni_entrez <- as.character(unlist(list(uni$entrezgene_id)))
+
+react_k2_1 <- enrichPathway(unlist(list(k2_symbol[[1]]$entrezgene_id)),
+                            universe=uni_entrez,
+                pvalueCutoff = 0.05)
+react_k2_1_res <- react_k2_1@result
+react_k2_1_sig <- react_k2_1_res %>% dplyr::filter(p.adjust < 0.1)
+```
+```{r}
+dotplot(kegg_k2_1, showCategory=15)
+dotplot(react_k2_1, showCategory=15)
+```
+```{r}
+cnetplot(react_k2_1, categorySize="p.adjust", foldChange=unlist(list(k2_symbol[[1]]$uniprot_gn_symbol)))
+#ggsave("Downloads/react_cnet.png", width=10, height=10)
+```
+
+```{r}
+library(enrichR)
+websiteLive <- getOption("enrichR.live")
+if (websiteLive) {
+    listEnrichrSites()
+    setEnrichrSite("Enrichr") # Human genes   
+}
+if (websiteLive) dbs <- listEnrichrDbs()
+if (websiteLive) head(dbs)
+```
+```{r}
+dbs <- c("MSigDB_Hallmark_2020", "GO_Biological_Process_2023", "WikiPathway_2021_Human", "BioCarta_2016", "Panther_2016")
+if (websiteLive) {
+    enriched <- enrichr(unlist(list(k2_symbol[[1]]$uniprot_gn_symbol)), dbs)
+}
+```
+```{r}
+if (websiteLive) msigdb_k2_1 <- enriched[["MSigDB_Hallmark_2020"]]
+if (websiteLive) go23_k2_1 <- enriched[["GO_Biological_Process_2023"]]
+if (websiteLive) wiki_k2_1 <- enriched[["WikiPathway_2021_Human"]]
+if (websiteLive) biocarta_k2_1 <- enriched[["BioCarta_2016"]]
+if (websiteLive) panther_k2_1 <- enriched[["Panther_2016"]]
+
+plotEnrich(msigdb_k2_1, showTerms = 30, numChar = 40, y = "Count", orderBy = "Adjusted.P.value")
+plotEnrich(go23_k2_1, showTerms = 30, numChar = 40, y = "Count", orderBy = "Adjusted.P.value")
+plotEnrich(wiki_k2_1, showTerms = 30, numChar = 40, y = "Count", orderBy = "Adjusted.P.value")
+plotEnrich(biocarta_k2_1, showTerms = 30, numChar = 40, y = "Count", orderBy = "Adjusted.P.value")
+plotEnrich(panther_k2_1, showTerms = 30, numChar = 40, y = "Count", orderBy = "Adjusted.P.value")
+```
+
+
+
+
+```{r}
+rm(list = ls())
+```

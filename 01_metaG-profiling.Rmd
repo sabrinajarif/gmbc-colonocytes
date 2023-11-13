@@ -265,9 +265,9 @@ The output in the kneaddata folder: \
 Download the fastq reports and check quality before running kraken. We will extract the raw files later and compile them, but for now we can just look at the html reports.
 ```{bash}
 sftp sarif@mesabi.msi.umn.edu:/scratch.global/sarif/2023_GMbC_metaG/QC_out/fastqc/ << EOF
-get raw/multiqc_report.html /Users/sabri/Downloads/multiqc_report_raw.html
-get post_cutadapt/multiqc_report.html /Users/sabri/Downloads/multiqc_report_cutadapt.html
-get post_kneaddata/multiqc_report.html /Users/sabri/Downloads/multiqc_report_kneaddata.html
+get raw/multiqc_report.html /Users/sabri/Documents/GitHub/gmbc-colonocytes/data/metaG-QC/html/multiqc_report_raw.html
+get post_cutadapt/multiqc_report.html /Users/sabri/Documents/GitHub/gmbc-colonocytes/data/metaG-QC/html/multiqc_report_cutadapt.html
+get post_kneaddata/multiqc_report.html /Users/sabri/Documents/GitHub/gmbc-colonocytes/data/metaG-QC/html/multiqc_report_kneaddata.html
 EOF
 ```
 
@@ -413,109 +413,95 @@ kraken2-inspect --db /home/blekhman/shared/GMbC_metagenomes/kraken2_db_completed
 Download
 ```{bash}
 sftp sarif@mesabi.msi.umn.edu:/scratch.global/sarif/2023_GMbC_metaG/tax_profiling/bracken/summary/ << EOF
-get bracken_species_combined.txt /Users/sabri/Downloads/bracken_species_combined.txt
-get taxonomy.tsv /Users/sabri/Downloads/taxonomy.tsv
+get bracken_species_combined.txt /Users/sabri/Documents/GitHub/gmbc-colonocytes/data/metaG-taxonomy/bracken_species_combined.txt
+get taxonomy.tsv /Users/sabri/Documents/GitHub/gmbc-colonocytes/data/metaG-taxonomy/Downloads/taxonomy.tsv
 EOF
 ```
-Peek at data
-```{r}
-library(tidyverse)
-library(stringr)
-
-bracken_species_combined <- read.csv("~/Downloads/bracken_species_combined.txt", sep="\t")
-head(bracken_species_combined)
-
-taxonomy <- read.csv("~/Downloads/taxonomy.tsv", sep="\t", header=F)
-# This messy solution is required because of the bad strings
-taxonomy_sep <- taxonomy %>%
-  mutate(row = V1) %>%
-  column_to_rownames("row") %>%
-  rename(taxonomy_id=2) %>%
-  select(taxonomy_id, everything()) %>%
-  mutate(d=str_extract(V1, "(?<=d__)[^|]+")) %>%
-  mutate(k=str_extract(V1, "(?<=k__)[^|]+")) %>%
-  mutate(p=str_extract(V1, "(?<=p__)[^|]+")) %>%
-  mutate(c=str_extract(V1, "(?<=c__)[^|]+")) %>%
-  mutate(o=str_extract(V1, "(?<=o__)[^|]+")) %>%
-  mutate(f=str_extract(V1, "(?<=f__)[^|]+")) %>%
-  mutate(g=str_extract(V1, "(?<=g__)[^|]+")) %>%
-  mutate(s=str_extract(V1, "(?<=s__)[^|]+")) %>%
-  select(!V1)
-
-head(taxonomy_sep)
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 ## Functional profiling
-I THINK I CAN USE KRAKEN/BRACKEN INPUT BUT IT MIGHT BE MORE COMPLICATED THAN I THOUGHT. NEED TO CREATE CUSTOM NUC AND PROT DATABASES IN THE STYLE OF METAPHLAN (MPA)
 ```{bash, eval=F}
 mkdir /scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata/humann_scripts
 mkdir /scratch.global/sarif/2023_GMbC_metaG/func_profiling
 ```
+Concentrate P1 and P2, and create batches for easier processing
+```{bash}
+# Concatenate files
+mkdir /scratch.global/sarif/2023_GMbC_metaG/func_profiling/p1p2_conc
+cd /scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata
+
+for name in *_kneaddata_paired_1.fastq; do
+    other="${name/_paired_1/_paired_2}"
+    cat "$name" "$other" > /scratch.global/sarif/2023_GMbC_metaG/func_profiling/p1p2_conc/"$name"
+done
+
+cd /scratch.global/sarif/2023_GMbC_metaG/func_profiling/p1p2_conc
+#for file in *; do mv "${file}" "${file/_R1_kneaddata_paired_1/}"; done
+```
 humann
 ```{bash, eval=F}
-#!/bin/sh        
-#SBATCH --time=24:00:00
-#SBATCH --ntasks=32
-#SBATCH --mem=100g
-#SBATCH --mail-type=ALL  
-#SBATCH --mail-user=sarif@umn.edu
-
-
-#Script for functional profiling of paired-end reads using HUMANn2
-
-
-#notes: - program assumes fastq files residing in single folder (typically will be kneaddata_out folder)
-#       - modify if have fasta or other file name (e.g., .fna, .fq, etc.)
-#         - program assumes reads have already been quality filtered and contaminants (human) removed
-#       - script outputs: stratified and unstratifed pathways and gene family files in CPM
-#       - HUMANn2 does not handle PE reads directly; so this script concatenates the F and R reads for each sample before running
-
-cd /scratch.global/sarif/2023_GMbC_metaG/QC_out/kneaddata
+cd /scratch.global/sarif/2023_GMbC_metaG/func_profiling/p1p2_conc
 samples=$(ls *_P_1_kneaddata_paired_1.fastq | sed 's/_P_1_kneaddata_paired_1.fastq//' | sort -u)
 
-cd bracken_scripts
+mkdir scripts
+cd scripts
 
-IN_DIR_kraken=/scratch.global/sarif/2023_GMbC_metaG/tax_profiling/kraken/p1p2_combined
-IN_DIR_bracken=/scratch.global/sarif/2023_GMbC_metaG/tax_profiling/bracken/p1p2_combined
-OUT_DIR=/scratch.global/sarif/2023_GMbC_metaG/func_profiling
-REF_DIR_nuc=/home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/chocophlan
-REF_DIR_prot=/home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/uniref
-
-cd $IN_DIR
-
+for sample in ${samples}; do
+    cat << EOF > "${sample}.job"
+#!/bin/bash
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=32
+#SBATCH --mem=60g
+#SBATCH -p blekhman
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+    
+cd /scratch.global/sarif/2023_GMbC_metaG/func_profiling/p1p2_conc
+   
 #Load modules
 module load python
 
 # Load venv
-conda activate biobakery3
+conda activate /home/blekhman/sarif/.conda/envs/biobakery3
 
-#Run HUMAnN
-for i in *.fastq
-do
-  humann --input-format kraken --kraken $IN_DIR_kraken/$i.kraken --bracken $IN_DIR_bracken/$i.bracken --output $OUT_DIR --nucleotide-database $REF_DIR_nuc --protein-database $REF_DIR_prot --threads 32 --translated-identity-threshold 97 --prescreen-threshold 0.0001 --nucleotide-query-coverage-threshold 70 --translated-query-coverage-threshold 97 --diamond-options="--threads 32"
+humann --input ${sample}_P_1_kneaddata_paired_1.fastq \
+    --nucleotide-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/chocophlan \
+    --protein-database /home/blekhman/sarif/gmbc_ccyte/KrakenBrackenHUMAnN/humann_dbs/uniref \
+    --threads 32 \
+    --translated-identity-threshold 97 \
+    --prescreen-threshold 0.0001 \
+    --nucleotide-query-coverage-threshold 70 \
+    --translated-query-coverage-threshold 97 \
+    --diamond-options="--threads 32" \
+    --output /scratch.global/sarif/2023_GMbC_metaG/func_profiling
+
+EOF
 done
 ```
+I think you need to run this first before submitting the jobs??
+```{python}
+#Load modules
+module load python
+# Load venv
+conda activate biobakery3
+```
+```{bash}
+cd /scratch.global/sarif/2023_GMbC_metaG/func_profiling/p1p2_conc/scripts
+
+for jobfile in *.job; do
+    sbatch "${jobfile}"
+done
+```
+I also want to experiment with inputting my custom kraken/bracken database intead of chocophlan. I will be going off of this biobakery thread: https://forum.biobakery.org/t/thoughts-on-custom-humann3-reference-databases/3383/5
+
+
+
+
+
+
+
+
+
 
 
 

@@ -1,0 +1,602 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(DESeq2)
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+```
+Load metadata
+```{r}
+meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
+  # Batch as character
+  mutate(Batch = as.character(Batch)) %>%
+  dplyr::filter(!SampleID==c("GMCC1S1", "GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
+  dplyr::filter(!SampleName=="4342XH") %>%
+  mutate(coculture = ifelse(grepl("control", SampleName), "control", "microbiome")) %>%
+  # Replace 0s in urbanism with control
+  mutate(urbanism = replace(urbanism, is.na(urbanism), "control")) %>%
+  mutate(country = replace(country, is.na(country), "control")) %>%
+  # Add one more column, urbanism2, which separates USA from non-USA urban
+  mutate(urbanism2=ifelse(country=="USA", "USA_urban", urbanism)) %>%
+  mutate(urbanism2 = replace(urbanism2, is.na(urbanism2), "control")) %>%
+  mutate(rnames=SampleID) %>%
+  column_to_rownames("rnames")
+meta <- meta[order(row.names(meta)), ]
+```
+Import raw read counts
+```{r}
+raw_read_cts_filt <- read.csv("results/docs/raw_read_cts_filt.csv", row.names=1) 
+raw_read_cts_filt <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% meta$SampleID]
+raw_read_cts_filt <- raw_read_cts_filt[, order(colnames(raw_read_cts_filt))]
+```
+Run DESeq model
+```{r}
+dds <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt,
+      colData = meta,
+      design= ~Batch + urbanism))
+```
+
+Results
+```{r}
+res_uc <- results(dds, contrast = c("urbanism", "urban", "control")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ensembl_gene_id")
+
+res_rc <- results(dds, contrast = c("urbanism", "rural", "control")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ensembl_gene_id")
+
+res_ur <- results(dds, contrast = c("urbanism", "urban", "rural")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ensembl_gene_id")
+```
+Filter for significance
+```{r}
+sig_uc <- res_uc %>%
+  dplyr::filter(padj<0.1) %>%
+  dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
+  mutate(model="sig_uc")
+sig_rc <- res_rc %>%
+  dplyr::filter(padj<0.1) %>%
+  dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
+  mutate(model="sig_rc")
+sig_ur <- res_ur %>%
+  dplyr::filter(padj<0.1)
+```
+```{r}
+library(EnhancedVolcano)
+EnhancedVolcano(res_uc,
+    lab = NA,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    pCutoff = 0.1,
+    FCcutoff = 0.1,
+    pointSize = 3.0,
+    labSize = 6.0)
+```
+
+L2FC scatterplot
+```{r}
+# Shared
+sig_shared <- intersect(sig_uc$ensembl_gene_id, sig_rc$ensembl_gene_id)
+# Unique
+sig_uc_only <- sig_uc %>%
+  dplyr::filter(!ensembl_gene_id %in% sig_shared)
+sig_rc_only <- sig_rc %>%
+  dplyr::filter(!ensembl_gene_id %in% sig_shared)
+
+res_uc_lab <- res_uc %>%
+  dplyr::select(ensembl_gene_id, log2FoldChange, padj, pvalue) %>%
+  mutate(neg_log10_padj = -log10(padj)) %>%
+  rename_with(~paste0(., "_uc"), -1) 
+res_rc_lab <- res_rc %>%
+  dplyr::select(ensembl_gene_id, log2FoldChange, padj, pvalue) %>%
+  mutate(neg_log10_padj = -log10(padj)) %>%
+  rename_with(~paste0(., "_rc"), -1)
+  
+res_uc_rc <- merge(
+  res_uc_lab[,c("ensembl_gene_id", "log2FoldChange_uc", "padj_uc", "neg_log10_padj_uc")], 
+  res_rc_lab[,c("ensembl_gene_id", "log2FoldChange_rc", "padj_rc", "neg_log10_padj_rc")], 
+  by="ensembl_gene_id") %>%
+  mutate(color_group = case_when(ensembl_gene_id %in% sig_shared ~ "Shared",
+                                 ensembl_gene_id %in% sig_rc_only$ensembl_gene_id ~ "Rural only",
+                                 ensembl_gene_id %in% sig_uc_only$ensembl_gene_id ~ "Urban only",
+                                 !ensembl_gene_id %in% sig_shared ~ "z_Non-sig")) %>%
+  mutate(sig = case_when(color_group != "z_Non-sig" ~ "Sig",
+                         color_group == "z_Non-sig" ~ "z_Non-sig")) %>%
+  mutate(abs_l2fc_uc = abs(log2FoldChange_uc)) %>%
+  mutate(abs_l2fc_rc = abs(log2FoldChange_rc)) %>%
+  arrange(desc(color_group))
+```
+Find most extreme genes belonging to uc or rc
+```{r}
+# Add an additional condition to exclude rows where padj or l2FC values are NA
+res_uc_rc_rank <- res_uc_rc[complete.cases(res_uc_rc[, c("padj_uc", "padj_rc", "neg_log10_padj_uc", "neg_log10_padj_rc", "log2FoldChange_uc", "log2FoldChange_rc")]), ]
+# Add a condition to exclude rows where padj < 0.01 in both uc and rc models
+res_uc_rc_rank <- res_uc_rc_rank[(res_uc_rc_rank$padj_uc < 0.01 | res_uc_rc_rank$padj_rc < 0.01), ]
+
+res_uc_rc_rank$neg_log10_padj_diff <- abs(res_uc_rc_rank$neg_log10_padj_uc - res_uc_rc_rank$neg_log10_padj_rc)
+res_uc_rc_rank$l2FC_diff <- abs(res_uc_rc_rank$log2FoldChange_uc - res_uc_rc_rank$log2FoldChange_rc)
+
+res_uc_rc_rank$neg_log10_padj_rank <- rank(-res_uc_rc_rank$neg_log10_padj_diff)
+res_uc_rc_rank$l2FC_rank <- rank(-res_uc_rc_rank$l2FC_diff)
+
+res_uc_rc_rank$rank_sum <- rowSums(res_uc_rc_rank[, c("neg_log10_padj_rank", "l2FC_rank")])
+
+top_genes <- res_uc_rc_rank[order(res_uc_rc_rank$rank_sum), ][1:100, ] %>%
+  mutate(most_extreme = "Most_Extreme: Urban v Control vs. Rural v Control")
+```
+```{r}
+res_uc_rc_v2 <- res_uc_rc %>%
+  left_join(top_genes[,c("ensembl_gene_id", "most_extreme")], by="ensembl_gene_id") %>%
+  mutate(sig_extreme = case_when(most_extreme == "Most_Extreme: Urban v Control vs. Rural v Control" & sig=="Sig" ~ "Extreme",
+                                 T ~ sig)) %>%
+  arrange(desc(sig_extreme))
+```
+
+```{r}
+ggplot(res_uc_rc, aes(x=abs_l2fc_uc, y=abs_l2fc_rc, color=color_group, fill=sig, shape=sig, size=sig)) +
+  geom_point(alpha=0.5) +
+  scale_shape_manual(values=c(19,3)) +
+  scale_color_manual(values=c("#6FBD8B", "grey20", "#7B2BC1", "grey80")) + 
+  scale_size_manual(values=c(1,1)) +
+  geom_abline(linetype="dashed")+
+  geom_smooth(data = subset(res_uc_rc_v2, sig == "Sig"), method = "lm", se = FALSE, size=0.5, color="indianred3") +
+  xlab("L2FC: Industrialized vs control") +
+  ylab("L2FC: Non-industrialized vs control") +
+  #xlim(values=c(-0.75,0.75)) +
+  #ylim(values=c(-0.75,0.75)) +
+  xlim(values=c(0, 0.75)) +
+  ylim(values=c(0, 0.75)) +
+  theme_linedraw() + 
+  coord_fixed() #+
+  #theme(legend.position="none")
+```
+```{r}
+most_sig <- rbind(res_uc, res_rc) %>%
+  arrange(padj) %>%
+  slice_head(n = 100) %>%
+  distinct(ensembl_gene_id) %>%
+  pull()
+  
+res_uc_lab2 <- res_uc %>%
+  dplyr::select(ensembl_gene_id, log2FoldChange, padj) %>%
+  mutate(contrast = "uc")
+res_rc_lab2 <- res_rc %>%
+  dplyr::select(ensembl_gene_id, log2FoldChange, padj) %>%
+  mutate(contrast = "rc")
+
+res_uc_rc_lab2 <-
+  rbind(res_uc_lab2, res_rc_lab2) %>%
+  left_join(res_uc_rc[,c("ensembl_gene_id", "sig", "color_group")], by="ensembl_gene_id") %>%
+  dplyr::filter(sig=="Sig") %>%
+  mutate(ind_sig = case_when(padj<0.005 ~ "Sig",
+                             padj>0.005 ~ "NS")) %>%
+  mutate(neg_log10_padj = -log10(padj)) %>%
+  dplyr::filter(ensembl_gene_id %in% most_sig)
+
+sorted_df <- res_uc_rc_lab2 %>%
+  group_by(ensembl_gene_id, log2FoldChange) %>%
+  mutate(avg_l2FC = log2FoldChange) %>%
+  arrange(avg_l2FC) %>%
+  dplyr::select(ensembl_gene_id)
+
+res_uc_rc_lab2$ensembl_gene_id <- factor(res_uc_rc_lab2$ensembl_gene_id, levels=unique(sorted_df$ensembl_gene_id))
+```
+```{r}
+ggplot(res_uc_rc_lab2, aes(x=log2FoldChange, y=ensembl_gene_id, fill=contrast, color=contrast, shape=ind_sig)) +
+  geom_path(aes(group=ensembl_gene_id), color="grey", size=0.25) +
+  geom_point(alpha=0.7) +
+  scale_shape_manual(values=c(3,21)) +
+  scale_color_manual(values=c("#457657", "#551D87")) +
+  scale_fill_manual(values=c("#6FBD8B", "#7B2BC1")) +
+  theme_linedraw() +
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        #legend.position="none",
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank()) +
+  geom_vline(xintercept=0, color="grey")
+ggsave("results/figs/RNAseq-urbanism/gene_l2fC_dotplot.png", width=3, height=7)
+```
+```{r}
+library(lattice)
+qqunif.plot<-function(pvalues, 
+	should.thin=T, thin.obs.places=2, thin.exp.places=2, 
+	xlab=expression(paste("Expected (",-log[10], " p-value)")),
+	ylab=expression(paste("Observed (",-log[10], " p-value)")), 
+	draw.conf=TRUE, conf.points=1000, conf.col="lightgray", conf.alpha=.05,
+	already.transformed=FALSE, pch=20, 
+	#aspect="iso", 
+	aspect=0.5,
+	prepanel=prepanel.qqunif,
+	par.settings=list(superpose.symbol=list(pch=pch)), ...) {
+	
+	
+	#error checking
+	if (length(pvalues)==0) stop("pvalue vector is empty, can't draw plot")
+	if(!(class(pvalues)=="numeric" || 
+		(class(pvalues)=="list" && all(sapply(pvalues, class)=="numeric"))))
+		stop("pvalue vector is not numeric, can't draw plot")
+	if (any(is.na(unlist(pvalues)))) stop("pvalue vector contains NA values, can't draw plot")
+	if (already.transformed==FALSE) {
+		if (any(unlist(pvalues)==0)) stop("pvalue vector contains zeros, can't draw plot")
+	} else {
+		if (any(unlist(pvalues)<0)) stop("-log10 pvalue vector contains negative values, can't draw plot")
+	}
+	
+	
+	grp<-NULL
+	n<-1
+	exp.x<-c()
+	if(is.list(pvalues)) {
+		nn<-sapply(pvalues, length)
+		rs<-cumsum(nn)
+		re<-rs-nn+1
+		n<-min(nn)
+		if (!is.null(names(pvalues))) {
+			grp=factor(rep(names(pvalues), nn), levels=names(pvalues))
+			names(pvalues)<-NULL
+		} else {
+			grp=factor(rep(1:length(pvalues), nn))
+		}
+		pvo<-pvalues
+		pvalues<-numeric(sum(nn))
+		exp.x<-numeric(sum(nn))
+		for(i in 1:length(pvo)) {
+			if (!already.transformed) {
+				pvalues[rs[i]:re[i]] <- -log10(pvo[[i]])
+				exp.x[rs[i]:re[i]] <- -log10((rank(pvo[[i]], ties.method="first")-.5)/nn[i])
+			} else {
+				pvalues[rs[i]:re[i]] <- pvo[[i]]
+				exp.x[rs[i]:re[i]] <- -log10((nn[i]+1-rank(pvo[[i]], ties.method="first")-.5)/(nn[i]+1))
+			}
+		}
+	} else {
+		n <- length(pvalues)+1
+		if (!already.transformed) {
+			exp.x <- -log10((rank(pvalues, ties.method="first")-.5)/n)
+			pvalues <- -log10(pvalues)
+		} else {
+			exp.x <- -log10((n-rank(pvalues, ties.method="first")-.5)/n)
+		}
+	}
+
+
+#	#this is a helper function to draw the confidence interval
+	panel.qqconf<-function(n, conf.points=1000, conf.col="gray", conf.alpha=.05, ...) {
+		require(grid)
+		conf.points = min(conf.points, n-1);
+		mpts<-matrix(nrow=conf.points*2, ncol=2)
+        	for(i in seq(from=1, to=conf.points)) {
+            		mpts[i,1]<- -log10((i-.5)/n)
+            		mpts[i,2]<- -log10(qbeta(1-conf.alpha/2, i, n-i))
+            		mpts[conf.points*2+1-i,1]<- -log10((i-.5)/n)
+            		mpts[conf.points*2+1-i,2]<- -log10(qbeta(conf.alpha/2, i, n-i))
+        	}
+        	grid.polygon(x=mpts[,1],y=mpts[,2], gp=gpar(fill=conf.col, lty=0), default.units="native")
+    	}
+
+	#reduce number of points to plot
+	if (should.thin==T) {
+		if (!is.null(grp)) {
+			thin <- unique(data.frame(pvalues = round(pvalues, thin.obs.places),
+				exp.x = round(exp.x, thin.exp.places),
+				grp=grp))
+			grp = thin$grp
+		} else {
+			thin <- unique(data.frame(pvalues = round(pvalues, thin.obs.places),
+				exp.x = round(exp.x, thin.exp.places)))
+		}
+		pvalues <- thin$pvalues
+		exp.x <- thin$exp.x
+	}
+	gc()
+	
+	prepanel.qqunif= function(x,y,...) {
+		A = list()
+		#A$xlim = range(x, y)*1.02
+		A$xlim = c(0,5)
+		A$xlim[1]=0
+		#A$ylim = A$xlim
+    A$ylim = c(0,15)
+		return(A)
+	}
+
+	#draw the plot
+	xyplot(pvalues~exp.x, groups=grp, xlab=xlab, ylab=ylab, aspect=1, #aspect
+		prepanel=prepanel, scales=list(axs="i"), pch=pch,   
+		panel = function(x, y, ...) {
+			if (draw.conf) {
+				panel.qqconf(n, conf.points=conf.points, 
+					conf.col=conf.col, conf.alpha=conf.alpha)
+			};
+			panel.xyplot(x,y, ...);
+			panel.abline(0,1);
+		}, par.settings=par.settings, ...
+	)
+}
+```
+
+```{r}
+select_v_all <- list("urban" = na.omit(res_uc$padj), "rural" = na.omit(res_rc$padj))
+select_v_all_qq <- qqunif.plot(select_v_all, auto.key=list(corner=c(.95,.05)), col=c("#7B2BC1", "#6FBD8B"))
+select_v_all_qq
+```
+
+
+
+How to derive residuals: https://support.bioconductor.org/p/60567/
+```{r}
+# Extract the residuals (batch and total.reads corrected counts)
+fitted.common.scale = t(t(assays(dds)[["mu"]])/sizeFactors(dds))
+residuals <- counts(dds, normalized=T) - fitted.common.scale
+
+# function to filter by significant genes
+filter_residuals <- function(residuals, sig_results) {
+  filtered_residuals <- residuals[sig_results$ensembl_gene_id, , drop = FALSE]
+  return(filtered_residuals)
+}
+
+# Use lapply to filter the "residuals" sub-element and retain "sig_results"
+residuals_filt_uc <- filter_residuals(residuals, sig_uc) %>% 
+    as.data.frame() %>% 
+    rownames_to_column("ensembl_gene_id") %>%
+  mutate(model="urban_v_ctrl")
+
+residuals_filt_rc <- filter_residuals(residuals, sig_rc) %>% 
+    as.data.frame() %>% 
+    rownames_to_column("ensembl_gene_id") %>%
+  mutate(model="rural_v_ctrl")
+
+residuals_melt <- rbind(residuals_filt_rc, residuals_filt_uc) %>%
+  pivot_longer(
+    cols = -c("model", "ensembl_gene_id"),
+    names_to = "SampleID",
+    values_to = "residual_gene_count"
+  ) %>%
+  left_join(meta[,c("SampleID", "urbanism")], by="SampleID") %>%
+  filter(!(model=="urban_v_ctrl" & urbanism=="rural")) %>%
+  filter(!(model=="rural_v_ctrl" & urbanism=="urban")) 
+```
+
+```{r}
+library(shiny)
+
+# Assuming you have already loaded your data into 'residuals_melt'
+
+# Define the UI
+ui <- fluidPage(
+  titlePanel("Batch + urbanism: Significant results only"),
+  mainPanel(
+    uiOutput("gene_selector_ui"),  # Dynamic gene selector
+    plotOutput("boxplot"),
+    fluidRow(
+      column(4, actionButton("prev_plot", "Previous Plot")),
+      column(4, actionButton("next_plot", "Next Plot"))
+    )
+  )
+)
+
+# Define the server
+server <- function(input, output, session) {
+  # Create a list of unique microbe_gene values
+  unique_genes <- unique(residuals_melt$ensembl_gene_id)
+  
+  # Initialize a reactive value to keep track of the current index
+  current_gene_index <- reactiveVal(1)
+  
+  # Create a dynamic UI element for gene selection
+  output$gene_selector_ui <- renderUI({
+    selectInput("gene_selector", "Select gene:", choices = unique_genes)
+  })
+  
+  # Create the dotplot
+  output$boxplot <- renderPlot({
+    ggplot(selected_data(), aes(x = urbanism, y = residual_gene_count, fill = urbanism)) +
+      geom_boxplot(alpha = 0.7) +
+      geom_jitter(width = 0.2) +
+      scale_fill_manual(values = c("grey", "#6FBD8B", "#7B2BC1")) +
+      theme_linedraw() +
+      facet_wrap(~model, scales = "free")
+  })
+  
+  # Define an observer for the "Next Plot" button
+  observeEvent(input$next_plot, {
+    # Increment the index to display the next plot
+    current_gene_index(current_gene_index() + 1)
+    
+    # Wrap back to the first plot if all plots have been shown
+    if (current_gene_index() > length(unique_genes)) {
+      current_gene_index(1)
+    }
+    
+    # Update the selected gene in the dropdown menu
+    updateSelectInput(session, "gene_selector", selected = unique_genes[current_gene_index()])
+  })
+  
+  # Define an observer for the "Previous Plot" button
+  observeEvent(input$prev_plot, {
+    # Decrement the index to display the previous plot
+    current_gene_index(current_gene_index() - 1)
+    
+    # Wrap to the last plot if going back from the first plot
+    if (current_gene_index() < 1) {
+      current_gene_index(length(unique_genes))
+    }
+    
+    # Update the selected gene in the dropdown menu
+    updateSelectInput(session, "gene_selector", selected = unique_genes[current_gene_index()])
+  })
+  
+  # Create a reactive data subset based on the current index and selected gene
+  selected_data <- reactive({
+    filter(residuals_melt, ensembl_gene_id == input$gene_selector)
+  })
+}
+
+# Run the Shiny app
+shinyApp(ui, server)
+
+```
+
+Functional analysis
+```{r}
+library(ensembldb)
+library(biomaRt)
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+
+# Define annotations
+att_interest <- c("ensembl_gene_id", "description", "hgnc_symbol") #"ensembl_transcript_id", 
+
+annotate_ensembl <- function(resdf){biomaRt::getBM(
+  attributes = att_interest, 
+  filters = "ensembl_gene_id",
+  values = resdf$ensembl_gene_id, 
+  mart = ensembl) %>%
+  left_join(resdf, by="ensembl_gene_id")
+}
+```
+
+```{r}
+# start with the genes that have the highest l2FCs and lowest padj values that are shared among the urban and rural
+
+uni <- unique(res_rc$ensembl_gene_id) %>%
+  as.data.frame()
+colnames(uni) <- "ensembl_gene_id"
+uni <- annotate_ensembl(uni)
+
+sig_top <- rbind(sig_uc, sig_rc) %>%
+  dplyr::filter(ensembl_gene_id %in% sig_shared) %>%
+  mutate(abs_l2fc = abs(log2FoldChange)) %>%
+  arrange(desc(abs_l2fc), padj) %>%
+  annotate_ensembl() #%>%
+  #slice(1:250)
+#length(unique(sig_top$hgnc_symbol))
+
+uc_top <- sig_uc %>%
+  #dplyr::filter(!ensembl_gene_id %in% sig_shared) %>%
+  mutate(abs_l2fc = abs(log2FoldChange)) %>%
+  arrange(desc(abs_l2fc), padj) %>%
+  annotate_ensembl() #%>%
+  #slice(1:250)
+#length(unique(uc_top$hgnc_symbol))
+
+rc_top <- sig_rc %>%
+  #dplyr::filter(!ensembl_gene_id %in% sig_shared) %>%
+  mutate(abs_l2fc = abs(log2FoldChange)) %>%
+  arrange(desc(abs_l2fc), padj) %>%
+  annotate_ensembl() #%>%
+  #slice(1:250)
+#length(unique(rc_top$hgnc_symbol))
+```
+https://cran.r-project.org/web/packages/msigdbr/vignettes/msigdbr-intro.html
+https://www.gsea-msigdb.org/gsea/msigdb/human/genesets.jsp?collection=CP
+```{r}
+library(msigdbr)
+msigdb_cpPID = msigdbr(species = "human", category = "C2", subcategory = "CP:PID")
+msigdb_cpKEGG = msigdbr(species = "human", category = "C2", subcategory = "CP:KEGG")
+msigdb_cpREACTOME = msigdbr(species = "human", category = "C2", subcategory = "CP:REACTOME")
+msigdb_cpBIOCARTA = msigdbr(species = "human", category = "C2", subcategory = "CP:BIOCARTA")
+
+msigdb_cp <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>%
+  rbind(msigdb_cpPID) 
+
+msigdb_cp_summary <- msigdb_cp %>%
+  group_by(gs_name) %>%
+  summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  # sambhawas filtering cutoffs
+  dplyr::filter(GeneCount >25, GeneCount < 300)
+  
+msigdb_cp_filt <- msigdb_cp %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpPID_filt <- msigdb_cpPID %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpKEGG_filt <- msigdb_cpKEGG %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpREACTOME_filt <- msigdb_cpREACTOME %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpBIOCARTA_filt <- msigdb_cpBIOCARTA %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+```
+Enrichment
+```{r}
+library(clusterProfiler)
+
+msigdb_cp_t2g = msigdb_cp_filt %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+
+shared_enrich <- enricher(gene = unique(sig_top$hgnc_symbol), TERM2GENE = msigdb_cp_t2g, universe = uni$hgnc_symbol)
+shared_enrich_res <- shared_enrich@result %>%
+  dplyr::filter(Count > 3, p.adjust < 0.1)
+
+uc_enrich <- enricher(gene = unique(uc_top$hgnc_symbol), TERM2GENE = msigdb_cp_t2g, universe = uni$hgnc_symbol)
+uc_enrich_res <- uc_enrich@result %>%
+  dplyr::filter(Count > 3, p.adjust < 0.1) %>%
+  mutate(model="uc")
+
+rc_enrich <- enricher(gene = unique(rc_top$hgnc_symbol), TERM2GENE = msigdb_cp_t2g, universe = uni$hgnc_symbol)
+rc_enrich_res <- rc_enrich@result %>%
+  dplyr::filter(Count > 3, p.adjust < 0.1) %>%
+  mutate(model="rc")
+```
+```{r}
+help("enricher")
+```
+
+
+```{r}
+enriched_pathways <- rbind(uc_enrich_res, rc_enrich_res) %>%
+  mutate(db = case_when(
+    grepl("REACTOME", ID) ~ "Reactome",
+    grepl("KEGG", ID) ~ "KEGG",
+    grepl("PID", ID) ~ "PID",
+    TRUE ~ "Other"  # Add a default value for other cases
+  )) %>%
+  mutate(neglog10_p.adjust = -log10(p.adjust)) %>%
+  mutate(as.numeric(neglog10_p.adjust)) %>%
+  arrange(neglog10_p.adjust)
+enriched_pathways$ID <- factor(enriched_pathways$ID, levels=unique(enriched_pathways$ID))
+
+ggplot(enriched_pathways, aes(x=model, y=ID, color=model, size=neglog10_p.adjust)) +
+  geom_point() +
+  scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(db ~ ., scales="free", space="free") +
+  theme_linedraw()
+ggsave("results/figs/RNAseq-urbanism/enriched_pathways.png", width=11, height=6.5)
+```
+
+```{r}
+enriched_pathways_sharedgenesonly <- shared_enrich_res %>%
+  mutate(db = case_when(
+    grepl("REACTOME", ID) ~ "Reactome",
+    grepl("KEGG", ID) ~ "KEGG",
+    grepl("PID", ID) ~ "PID",
+    TRUE ~ "Other"  # Add a default value for other cases
+  )) %>%
+  mutate(neglog10_p.adjust = -log10(p.adjust)) %>%
+  mutate(as.numeric(neglog10_p.adjust)) %>%
+  arrange(neglog10_p.adjust) %>%
+  mutate(value="value")
+enriched_pathways_sharedgenesonly$ID <- factor(enriched_pathways_sharedgenesonly$ID, levels=unique(enriched_pathways_sharedgenesonly$ID))
+
+ggplot(enriched_pathways_sharedgenesonly, aes(x=value, y=ID, size=neglog10_p.adjust)) +
+  geom_point() +
+  #scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(db ~ ., scales="free", space="free") +
+  theme_linedraw()
+ggsave("results/figs/RNAseq-urbanism/enriched_pathways_sharedgenesonly.png", width=8, height=2)
+```
+
+
+
+```{r}
+rm(list = ls())
+```

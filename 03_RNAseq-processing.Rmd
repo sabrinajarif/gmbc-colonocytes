@@ -1,0 +1,476 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(ensembldb)
+library(ape)
+library(Hmisc)
+library(corrplot)
+library(data.table)
+library(ggrepel)
+library(biomaRt)
+```
+First we need to rename the files in order to make the compatible with downstream steps
+```{bash}
+# Terminal
+# Navigate to fastq folder, then delete irrelevant files
+/panfs/roc/groups/7/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq
+# For every given folder, create a list of filenames (example given below, but we will have several "filenames.txt" files for each sequencing batch)
+ls > filenames.txt
+```
+```{r}
+# Now download from filezilla and import into R
+# Rename filename column for simplicity, add in date for reference, and give date an id "I" for "Illumina"
+filenames_210723 <- read.csv("../data/fastq_filenames/filenames_210723.txt") %>%
+  rename(globus_filename = 1) %>%
+  mutate(seq_date = "210723") %>%
+  mutate(seq_id = "I1")
+filenames_211023 <- read.csv("../data/fastq_filenames/filenames_211023.txt") %>%
+  rename(globus_filename = 1) %>%
+  mutate(seq_date = "211023") %>%
+  mutate(seq_id = "I2")
+filenames_220204 <- read.csv("../data/fastq_filenames/filenames_220204.txt") %>%
+  rename(globus_filename = 1) %>%
+  mutate(seq_date = "220204") %>%
+  mutate(seq_id = "I3")
+filenames_220223 <- read.csv("../data/fastq_filenames/filenames_220223.txt") %>%
+  rename(globus_filename = 1) %>%
+  mutate(seq_date = "220223") %>%
+  mutate(seq_id = "I4")
+filenames_220307 <- read.csv("../data/fastq_filenames/filenames_220307.txt") %>%
+  rename(globus_filename = 1) %>%
+  mutate(seq_date = "220307") %>%
+  mutate(seq_id = "I5")
+```
+```{r}
+# The first set of filenames from 210723 are different from the others. First adjust the names to match the others
+filenames_210723[,1] <- sub("_", "", filenames_210723[,1]) # remove first occurence of underscore
+```
+Now let's coordinate the filename objects into a list, then break down the string components
+```{r}
+# List of dfs
+filenames_list <- list(filenames_210723, filenames_211023, filenames_220204, filenames_220223, filenames_220307)
+# Duplicate globus_filename
+filenames_string <- lapply(filenames_list, mutate, globus_filename2=globus_filename)
+# Separate globus_filename into strings
+filenames_string <- lapply(filenames_string, separate, globus_filename2, c("sample_name", "seq_number", "R1_R2", "filetype"), "_")
+# Create new filename for each sample
+filenames_string <- lapply(filenames_string, mutate, new_filename=paste(sample_name, seq_id, R1_R2, filetype, sep="_"))
+# Extract just the original and new filenames
+filenames_pairs <- lapply(filenames_string, select, globus_filename, new_filename)
+```
+Check each
+```{r}
+filenames_pairs[1]
+filenames_pairs[2]
+filenames_pairs[3]
+filenames_pairs[4]
+filenames_pairs[5]
+```
+Unlist, then save as individual .txt files without headers
+```{r}
+newfilenames_210723 <- data.frame(filenames_pairs[1])
+newfilenames_211023 <- data.frame(filenames_pairs[2])
+newfilenames_220204 <- data.frame(filenames_pairs[3])
+newfilenames_220223 <- data.frame(filenames_pairs[4])
+newfilenames_220307 <- data.frame(filenames_pairs[5])
+```
+Forgot we need to re-convert 210723 samples
+```{r}
+newfilenames_210723$globus_filename <- sub("^(.{5})", "\\1_", newfilenames_210723$globus_filename)
+```
+```{r}
+write.table(newfilenames_210723, "../data/fastq_filenames/newfilenames_210723.txt", sep=",",  col.names=FALSE, row.names=FALSE, quote = FALSE)
+write.table(newfilenames_211023, "../data/fastq_filenames/newfilenames_211023.txt", sep=",",  col.names=FALSE, row.names=FALSE, quote = FALSE)
+write.table(newfilenames_220204, "../data/fastq_filenames/newfilenames_220204.txt", sep=",",  col.names=FALSE, row.names=FALSE, quote = FALSE)
+write.table(newfilenames_220223, "../data/fastq_filenames/newfilenames_220223.txt", sep=",",  col.names=FALSE, row.names=FALSE, quote = FALSE)
+write.table(newfilenames_220307, "../data/fastq_filenames/newfilenames_220307.txt", sep=",",  col.names=FALSE, row.names=FALSE, quote = FALSE)
+```
+Now back to the terminal, rename the files in individual folders. One example shown
+https://unix.stackexchange.com/questions/87694/renaming-files-based-on-the-contents-of-a-text-file
+```{bash}
+while IFS=',' read -a files 
+do 
+   mv "${files[0]}" "${files[1]}" 
+done < newfilenames_210723.txt
+```
+Now release all files to main folder, pulling out of individual folders
+https://askubuntu.com/questions/146634/shell-script-to-move-all-files-from-subfolders-to-parent-folder
+First move to parent folder then run"
+```{bash}
+find . -mindepth 2 -type f -print -exec mv {} . \;
+```
+There are 396 files: 198 pairs. I removed all "undetermined" samples. 
+I1: 30 files from globus
+I2: 70 files from globus
+I3: 144 files from globus
+I4: 76 files from globus
+I5: 76 files from globus
+Numbers add up! 
+Now let's create additional files that are merged samples.
+https://www.biostars.org/p/317385/
+```{bash}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=32g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+cd /panfs/roc/groups/7/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq
+
+for i in $(ls -1 | sed 's/[_].*$//' | uniq)
+
+    do echo "Merging R1"
+
+cat "$i"_I*_R1_001.fastq.gz > "$i"_ME_R1_001.fastq.gz
+
+       echo "Merging R2"
+
+cat "$i"_I*_R2_001.fastq.gz > "$i"_ME_R2_001.fastq.gz
+
+done;
+```
+On filezilla, I moved these merged files into a separate folder (/merged). They contain not only the merged files, but the files from GMCC1 that were only run once, but still have the new "ME" string. These files are the exact same size as the original files.
+The metadata Shreya sent me contains 88 files (of those samples that have been run). The merged data contains 88 pairs.
+To start, I will just run the pipeline on the merged samples. If that all looks good, I'll return to running the individual un-merged files. I know there will be issues with this because for some, the library sizes are so small they error when it comes time to do edgeR.
+
+For analysis of the pilot RNA seq data, I will be using the CHURP pipeline from MSI: https://pages.github.umn.edu/MSI-RIS/Tutorials/rnaseq_cmd/
+```{bash}
+module load churp/0.2.2-slurm
+# Make a directory in scratch space
+mkdir -p /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME
+mkdir -p /scratch.global/sarif/gmbc_ccyte_CHURP/Work_ME
+# Make metadata
+$CHURP group_template bulk_rnaseq \
+    -f /home/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq/merged \
+    -o /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME/gmbc_ccyte_CHURP_meta.csv
+```
+SUCCESS
+
+Template file: /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME/gmbc_ccyte_CHURP_meta.csv
+
+All sample groups and any additional columns have specified have been filled
+with NULL. Please edit the file and write in the correct values for your
+dataset. Samples with the same "Group" label will be treated as replicates
+in the analysis. Samples with a "Group" value of NULL will not be used in
+downstream differential expression analysis. When you have edited the file to
+your liking, supply its path to the "bulk_rnaseq" pipeline with the -e
+option to enable group testing.
+```{bash}
+$CHURP bulk_rnaseq \-e /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME/gmbc_ccyte_CHURP_meta.csv \-f /home/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq/merged \-x /panfs/roc/risdb_new/ensembl/main/homo_sapiens/GRCh38/hisat2/genome \-g /panfs/roc/risdb_new/ensembl/main/homo_sapiens/GRCh38/annotation/Homo_sapiens.GRCh38.100.gtf.gz \-o /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME \-d /scratch.global/sarif/gmbc_ccyte_CHURP/Work_ME \--rmdup --ppn 6 --mem 60000 -w 24 --no-submit
+```
+SUCCESS
+
+Samplesheet and pipeline script generation complete! Their paths are given
+below:
+
+Pipeline script: /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME/2022-04-15.sarif.bulk_rnaseq.pipeline.sh
+Samplesheet: /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME/2022-04-15.sarif.bulk_rnaseq.samplesheet.txt
+Sbatch array key: /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME/2022-04-15.sarif.bulk_rnaseq.qsub_array.txt
+
+Verify the information in the samplesheet, and run the pipeline script with
+bash while logged into Mesabi. You will recieve email notifications of job
+start/completion/error at your UMN X500 email address. If you need to submit
+an error report, please contact help[at]msi.umn.edu. Please include the
+samplesheet, pipeline script, and the error message with your report.
+```{bash}
+# Execute script
+bash /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME/2022-04-15.sarif.bulk_rnaseq.pipeline.sh
+```
+sbatch: Setting account: blekhman
+sbatch: Setting account: blekhman
+Output and logs will be written to /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME
+Emails will be sent to sarif@umn.edu
+Sbatch array to samplename key: /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME/2022-04-15.sarif.bulk_rnaseq.qsub_array.txt
+Single samples job array ID: 12329846
+Summary job ID: 12329847
+
+Now I am going to repeat that analysis on the un-merged files. I will likely encounter some issues with some of the file sizes being too small, but at least I will be able to single out those that are causing the issues and re-run.
+```{bash}
+module load churp/0.2.2-slurm
+# Make a directory in scratch space
+mkdir -p /scratch.global/sarif/gmbc_ccyte_CHURP/Out
+mkdir -p /scratch.global/sarif/gmbc_ccyte_CHURP/Work
+# Make metadata
+$CHURP group_template bulk_rnaseq \
+    -f /home/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq \
+    -o /scratch.global/sarif/gmbc_ccyte_CHURP/Out/gmbc_ccyte_CHURP_meta.csv
+```
+```{bash}
+$CHURP bulk_rnaseq \-e /scratch.global/sarif/gmbc_ccyte_CHURP/Out/gmbc_ccyte_CHURP_meta.csv \-f /home/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq \-x /panfs/roc/risdb_new/ensembl/main/homo_sapiens/GRCh38/hisat2/genome \-g /panfs/roc/risdb_new/ensembl/main/homo_sapiens/GRCh38/annotation/Homo_sapiens.GRCh38.100.gtf.gz \-o /scratch.global/sarif/gmbc_ccyte_CHURP/Out \-d /scratch.global/sarif/gmbc_ccyte_CHURP/Work \--rmdup --ppn 6 --mem 32000 -w 24 --no-submit
+```
+```{bash}
+# Execute script
+bash /scratch.global/sarif/gmbc_ccyte_CHURP/Out/2022-04-16.sarif.bulk_rnaseq.pipeline.sh
+```
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+Important files from this analysis:
+Sample quality report (merged): 
+  /scratch.global/sarif/gmbc_ccyte_CHURP/Out_ME/Bulk_RNAseq_Report.html
+RNA seq technical meetrics (merged):
+  /scratch.global/sarif/gmbc_ccyte_CHURP/Work_ME/allsamples/RNASeq_Metrics.txt
+Subread counts (merged):
+  /scratch.global/sarif/gmbc_ccyte_CHURP/Work_ME/allsamples/subread_counts.txt
+Subread counts (unmerged):
+  /scratch.global/sarif/gmbc_ccyte_CHURP/Work/allsamples/subread_counts.txt
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+After the run, I identified these files as those with a small number of mapped gene counts:
+GMCC2S12_I3   0
+GMCC2C1_I3    44
+GMCC2S2_I3    8
+GMCC2S9_I3    7
+GMCC2S11_I3   56
+GMCC2S13_I3   19
+GMCC3S1_I3    8
+
+I'd like to group these samples in with the QC of the other samples, so instead of starting at the .bam file level, I am just going to exclude the one holding up the pipeline (GMCC2S12_I3) and run the remainder. I predict the QC report on these samples will look pretty bad- if so, I will remove them and re-run the merged samples
+```{bash}
+# First, need to create a new directory that excludes that sample
+# Navigate and create file
+cd /panfs/roc/groups/7/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq
+mkdir colonocyte_RNAseq_fastq_samples_excluded
+# In bash, use an extended glob to copy over desired files and leave behind others
+# https://askubuntu.com/questions/1163773/how-can-i-copy-a-directory-without-copying-a-specific-file-or-subdirectory-in-te
+shopt -s extglob
+cp -r colonocyte_RNAseq_fastq/!(merged) colonocyte_RNAseq_fastq_samples_excluded/
+# Move back into directory to be tidy
+mv colonocyte_RNAseq_fastq_samples_excluded colonocyte_RNAseq_fastq
+```
+Make sure to delete GMCC2S12_I3 on filezilla!
+Repeat analysis
+```{bash}
+module load churp/0.2.2-slurm
+# Make a directory in scratch space
+mkdir -p /scratch.global/sarif/gmbc_ccyte_CHURP/Out_samples_excluded
+mkdir -p /scratch.global/sarif/gmbc_ccyte_CHURP/Work_samples_excluded
+# Make metadata
+$CHURP group_template bulk_rnaseq \
+    -f /home/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq/colonocyte_RNAseq_fastq_samples_excluded \
+    -o /scratch.global/sarif/gmbc_ccyte_CHURP/Out_samples_excluded/gmbc_ccyte_CHURP_meta.csv
+```
+```{bash}
+$CHURP bulk_rnaseq \-e /scratch.global/sarif/gmbc_ccyte_CHURP/Out_samples_excluded/gmbc_ccyte_CHURP_meta.csv \-f /home/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq/colonocyte_RNAseq_fastq_samples_excluded \-x /panfs/roc/risdb_new/ensembl/main/homo_sapiens/GRCh38/hisat2/genome \-g /panfs/roc/risdb_new/ensembl/main/homo_sapiens/GRCh38/annotation/Homo_sapiens.GRCh38.100.gtf.gz \-o /scratch.global/sarif/gmbc_ccyte_CHURP/Out_samples_excluded \-d /scratch.global/sarif/gmbc_ccyte_CHURP/Work_samples_excluded \--rmdup --ppn 6 --mem 32000 -w 24 --no-submit
+```
+```{bash}
+# Execute script
+bash /scratch.global/sarif/gmbc_ccyte_CHURP/Out_samples_excluded/2022-04-24.sarif.bulk_rnaseq.pipeline.sh
+```
+Looking at the bulk rna seq report, here are the samples I want exlcuded from the merged files:
+GMCC1S1_I1 (lots of rRNA contamination)
+GMCC2S2_I3 (bad quality)
+GMCC2S9_I3 (bad quality)
+GMCC3S1_I3 (bad quality)
+GMCC2S12_I3 (no reads)
+
+First delete these samples from the samples_excluded directory (filezilla), then merge the remaining files.
+```{bash}
+#!/bin/sh        
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=8
+#SBATCH --mem=32g
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sarif@umn.edu
+
+cd /panfs/roc/groups/7/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq/colonocyte_RNAseq_fastq_samples_excluded
+
+for i in $(ls -1 | sed 's/[_].*$//' | uniq)
+
+    do echo "Merging R1"
+
+cat "$i"_I*_R1_001.fastq.gz > "$i"_ME_R1_001.fastq.gz
+
+       echo "Merging R2"
+
+cat "$i"_I*_R2_001.fastq.gz > "$i"_ME_R2_001.fastq.gz
+
+done;
+```
+Move files to new /merged subdirectory on filezilla, then repeat CHURP steps.
+```{bash}
+module load churp/0.2.2-slurm
+# Make a directory in scratch space
+mkdir -p /scratch.global/sarif/gmbc_ccyte_CHURP/Out_samples_excluded_merged
+mkdir -p /scratch.global/sarif/gmbc_ccyte_CHURP/Work_samples_excluded_merged
+# Make metadata
+$CHURP group_template bulk_rnaseq \
+    -f /home/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq/colonocyte_RNAseq_fastq_samples_excluded/merged \
+    -o /scratch.global/sarif/gmbc_ccyte_CHURP/Out_samples_excluded_merged/gmbc_ccyte_CHURP_meta.csv
+```
+```{bash}
+$CHURP bulk_rnaseq \-e /scratch.global/sarif/gmbc_ccyte_CHURP/Out_samples_excluded_merged/gmbc_ccyte_CHURP_meta.csv \-f /home/blekhman/sarif/gmbc_ccyte/colonocyte_RNAseq_fastq/colonocyte_RNAseq_fastq_samples_excluded/merged \-x /panfs/roc/risdb_new/ensembl/main/homo_sapiens/GRCh38/hisat2/genome \-g /panfs/roc/risdb_new/ensembl/main/homo_sapiens/GRCh38/annotation/Homo_sapiens.GRCh38.100.gtf.gz \-o /scratch.global/sarif/gmbc_ccyte_CHURP/Out_samples_excluded_merged \-d /scratch.global/sarif/gmbc_ccyte_CHURP/Work_samples_excluded_merged \--rmdup --ppn 6 --mem 32000 -w 24 --no-submit
+```
+```{bash}
+# Execute script
+bash /scratch.global/sarif/gmbc_ccyte_CHURP/Out_samples_excluded_merged/2022-04-25.sarif.bulk_rnaseq.pipeline.sh
+```
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+SETUP
+
+The relevant piece of information from the preprocessing steps is the counts matrix. I moved that from scratch to my MSI folder and also downloaded it to my home directory. 
+```{r}
+subread_cts <- read.table("data/RNAseq/merged_samplesexcluded/subread_counts_merged_samplesexcluded.txt", header=TRUE, sep="\t")
+raw_read_cts <- as.matrix(subread_cts[,-c(1:6)])
+# Gene ids to rownames
+rownames(raw_read_cts) <- subread_cts[, 1] 
+# Remove _ME string
+colnames(raw_read_cts) <- gsub("_ME",  "", colnames(raw_read_cts), fixed = TRUE)
+```
+Load in technical metrics from sequencing, QC, mapping (merged samples only)
+```{r}
+# Extra technical metrics
+meta_qc_additional <- read.csv("data/RNAseq/merged_samplesexcluded/RNASeq_Metrics_additional_merged_samplesexcluded.txt", sep="\t")
+# Main files of technical metrics
+meta_qc <- read.csv("data/RNAseq/merged_samplesexcluded/RNASeq_Metrics_merged_samplesexcluded.txt", sep="\t", header=F) %>%
+  # Wide format and string removal
+  reshape(idvar = "V1", timevar = "V2", direction = "wide") %>%
+  rename_with(~str_remove(., 'V3.')) %>%
+  # Add in extra technical metrics
+  left_join(meta_qc_additional, by="V1") %>%
+  # Column renaming
+  rename_with(~str_replace_all(., " ", ".")) %>%
+  mutate(SampleID = sub("_ME", "", V1)) %>%
+  dplyr::rename(SampleID_CHURP = V1) %>%
+  # Columns in alphabetical order
+  dplyr::select(sort(names(.))) %>%
+  relocate(SampleID, everything())
+```
+Load in main meta and add coculture condition 
+```{r}
+meta <- read.csv("data/metadata/GMCC_covariates_all_batches.csv") %>%
+  mutate(SampleID = sub("_", "", SampleID)) %>%
+  mutate(coculture = ifelse(grepl("control", SampleName), "control", "microbiome"))
+```
+Combine metadata with technical metrics (merged samples only)
+```{r}
+meta <- meta %>%
+  left_join(meta_qc, by="SampleID")
+write.csv(meta, "data/metadata/meta_RNAseq.csv")
+```
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+TECHNICAL METRICS PLOTTING
+
+Total reads (bar chart)
+```{r}
+ggplot(meta, aes(x=SampleID, y=Total.Reads)) +
+  geom_bar(stat="identity") +
+  facet_wrap(~Batch, ncol=5, scales="free_x") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+Read quality
+```{r}
+ggplot(meta, aes(x=SampleID, y=Average.Read.Quality, fill=Average.Read.Quality)) +
+  geom_bar(stat="identity") +
+  facet_wrap(~Batch, ncol=5, scales="free_x") + 
+  binned_scale(aesthetics = "fill",
+               scale_name = "stepsn", 
+               palette = function(x) c("red", "orange", "pink", "yellow", "green", "forestgreen"),
+               breaks = c(10, 20, 25, 30, 40, 45),
+               limits = c(0, 45),
+               show.limits = TRUE, 
+               guide = "colorsteps"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+rRNA contamination
+```{r}
+ggplot(meta, aes(x=SampleID, y=rRNA_Pct, fill=rRNA_Pct)) +
+  geom_bar(stat="identity") +
+  facet_wrap(~Batch, ncol=5, scales="free_x") + 
+  binned_scale(aesthetics = "fill",
+               scale_name = "stepsn", 
+               palette = function(x) c("grey40", "red"),
+               breaks = c(0, 35),
+               limits = c(0, 0.6),
+               show.limits = TRUE, 
+               guide = "colorsteps") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+4) % Fragments mapped to exons vs. introns vs. intergenic
+
+5) Bar chart of uniquely vs. multiply vs discordantly vs unmapped reads
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+FILTERING
+
+First remove outlier samples
+```{r}
+outliers <- c("GMCC1S1", "GMCC4S10")
+raw_read_cts <- raw_read_cts[, colnames(raw_read_cts) != outliers]
+meta <- meta[meta$SampleID != outliers, ]
+```
+Next, use biomaRt to filter for only protein coding genes.
+Select the human gene database:
+```{r}
+ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl", mirror=NULL)
+```
+Filter out non-protein coding genes and genes with no assigned novel genes (no symbol)
+```{r}
+# Run mart
+raw_read_cts_anno <- biomaRt::getBM(
+  attributes = c("ensembl_gene_id", "gene_biotype", "hgnc_symbol"), 
+  filters = "ensembl_gene_id",
+  values = rownames(raw_read_cts), 
+  mart = ensembl)
+```
+```{r}
+# Filter by protein coding
+raw_read_cts_prtn <- raw_read_cts_anno %>%
+  dplyr::filter(gene_biotype=="protein_coding") %>%
+  dplyr::filter(!hgnc_symbol=="")
+# Apply to counts matrix
+raw_read_cts_prtn <- subset(raw_read_cts, rownames(raw_read_cts) %in% raw_read_cts_prtn$ensembl_gene_id)
+# Check before and after
+paste0("pre-filt: ", nrow(raw_read_cts))
+paste0("post-filt: ", nrow(raw_read_cts_prtn))
+```
+
+Next, filter by abundance of zero-counts in groups
+```{r}
+# Create list of the SampleIDs corresponding to different groups
+coculture_ctrl <- subset(meta$SampleID, meta$coculture == "control")
+coculture_microbiome <- unlist(subset(meta$SampleID, meta$coculture == "microbiome"))
+urbanism_urban <- unlist(subset(meta$SampleID, meta$urbanism == "urban"))
+urbanism_rural <- unlist(subset(meta$SampleID, meta$urbanism == "rural"))
+
+# Add columns to the counts matrix indicating the percentage of individuals with zero gene expression of each gene within a given group. 
+raw_read_cts_grp <- as.data.frame(raw_read_cts_prtn)
+raw_read_cts_grp <- raw_read_cts_grp %>%
+  rownames_to_column('ensembl_gene_id') %>%
+  mutate(perc0_coculture_ctrl = 
+           rowSums(across(all_of(coculture_ctrl))==0)/length(coculture_ctrl)) %>%
+  mutate(perc0_coculture_microbiome =
+           rowSums(across(all_of(coculture_microbiome))==0)/length(coculture_microbiome)) %>%
+  mutate(perc0_urbanism_urban = 
+           rowSums(across(all_of(urbanism_urban))==0)/length(urbanism_urban)) %>%
+  mutate(perc0_urbanism_rural = 
+           rowSums(across(all_of(urbanism_rural))==0)/length(urbanism_rural))
+
+# Keep genes which have 0 values in less than or equal to 50% control group samples OR 50% urban group samples OR 50% of rural group samples
+raw_read_cts_filt <- raw_read_cts_grp %>%
+  subset(perc0_coculture_ctrl <= 0.5 | perc0_coculture_microbiome <= 0.5) %>%
+  subset(perc0_urbanism_urban <= 0.5 | perc0_urbanism_rural <= 0.5) %>%
+  dplyr::select(-(starts_with("perc0"))) %>%
+  `row.names<-`(., NULL) %>%
+  column_to_rownames("ensembl_gene_id") %>%
+  as.matrix()
+write.csv(raw_read_cts_filt, "results/docs/raw_read_cts_filt.csv")
+
+# Count difference
+paste0("pre-filt: ", nrow(raw_read_cts_grp))
+paste0("post-filt: ", nrow(raw_read_cts_filt))
+```
+Columns of all zeros create issues. Also, make sure continuous numeric columns are indeed numeric. Before, I had Total.Reads classified as a factor, meaning that every read was given its own column which obviously matched to only one sample, which produced a linear relationship which gave rise to the "not full rank" error.
+
+Lastly, make sure all NAs are actually NA
+```{r}
+meta[meta == "N/A"] <- NA
+```
