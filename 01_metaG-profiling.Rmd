@@ -270,6 +270,11 @@ get post_cutadapt/multiqc_report.html /Users/sabri/Documents/GitHub/gmbc-colonoc
 get post_kneaddata/multiqc_report.html /Users/sabri/Documents/GitHub/gmbc-colonocytes/data/metaG-QC/html/multiqc_report_kneaddata.html
 EOF
 ```
+```{r}
+sftp sjarif@midway3.rcc.uchicago.edu:/project/blekhman/sjarif/GMbC/metaG_results/humann/genefam/ko/ << EOF
+get ko_genefam_combined.tsv
+EOF
+```
 
 
 ## Taxonomic profiling

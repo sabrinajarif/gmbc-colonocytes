@@ -449,6 +449,7 @@ shinyApp(ui, server)
 ```
 
 Functional analysis
+First annotate data with gene labels compatible with enrichment analyses. I like to have the uniprot gene symbol (hgnc_symbol) and a description just for my own readability.
 ```{r}
 library(ensembldb)
 library(biomaRt)
@@ -466,14 +467,18 @@ annotate_ensembl <- function(resdf){biomaRt::getBM(
 }
 ```
 
+Next define universe and gene set of interest. For my universe I used every gene I originally tested, and for sig I used the "top" significant genes (greatest l2FC + smallest p adjusted). Choosing the number of genes to test is a trade-off with multiple testing burden, but at least 100 genes will give you decent power. In this case my universe and sig are both dataframes, but character vectors are fine too.
+Here I am experimenting with 3 different gene sets: "shared" (or "sig" here), "uc" and "rc". 
 ```{r}
 # start with the genes that have the highest l2FCs and lowest padj values that are shared among the urban and rural
 
+# dataframe of about 14,000 genes
 uni <- unique(res_rc$ensembl_gene_id) %>%
   as.data.frame()
 colnames(uni) <- "ensembl_gene_id"
 uni <- annotate_ensembl(uni)
 
+# dataframe of sig genes 
 sig_top <- rbind(sig_uc, sig_rc) %>%
   dplyr::filter(ensembl_gene_id %in% sig_shared) %>%
   mutate(abs_l2fc = abs(log2FoldChange)) %>%
@@ -482,6 +487,7 @@ sig_top <- rbind(sig_uc, sig_rc) %>%
   #slice(1:250)
 #length(unique(sig_top$hgnc_symbol))
 
+# another dataframe of sig genes 
 uc_top <- sig_uc %>%
   #dplyr::filter(!ensembl_gene_id %in% sig_shared) %>%
   mutate(abs_l2fc = abs(log2FoldChange)) %>%
@@ -490,6 +496,7 @@ uc_top <- sig_uc %>%
   #slice(1:250)
 #length(unique(uc_top$hgnc_symbol))
 
+# another dataframe of sig genes 
 rc_top <- sig_rc %>%
   #dplyr::filter(!ensembl_gene_id %in% sig_shared) %>%
   mutate(abs_l2fc = abs(log2FoldChange)) %>%
@@ -500,22 +507,30 @@ rc_top <- sig_rc %>%
 ```
 https://cran.r-project.org/web/packages/msigdbr/vignettes/msigdbr-intro.html
 https://www.gsea-msigdb.org/gsea/msigdb/human/genesets.jsp?collection=CP
+
+Next choose the databases you want to test. KEGG and Reactome are the most relevant for my research.
+Per Sambhawa's 2022 pub, I am only investigating a pathway if it contains at least 25 genes but less than 300 genes. 
 ```{r}
 library(msigdbr)
+
+# download databases of interest
 msigdb_cpPID = msigdbr(species = "human", category = "C2", subcategory = "CP:PID")
 msigdb_cpKEGG = msigdbr(species = "human", category = "C2", subcategory = "CP:KEGG")
 msigdb_cpREACTOME = msigdbr(species = "human", category = "C2", subcategory = "CP:REACTOME")
 msigdb_cpBIOCARTA = msigdbr(species = "human", category = "C2", subcategory = "CP:BIOCARTA")
 
+# Experimenting with pasting these all together to reduce code burden
 msigdb_cp <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>%
   rbind(msigdb_cpPID) 
 
+# Summarize metrics from all pathways from all databases
 msigdb_cp_summary <- msigdb_cp %>%
   group_by(gs_name) %>%
   summarize(GeneCount = n_distinct(gene_symbol)) %>%
   # sambhawas filtering cutoffs
   dplyr::filter(GeneCount >25, GeneCount < 300)
-  
+
+# Narrow down pathways that meet our thresholds  
 msigdb_cp_filt <- msigdb_cp %>%
   dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
 msigdb_cpPID_filt <- msigdb_cpPID %>%
@@ -527,14 +542,19 @@ msigdb_cpREACTOME_filt <- msigdb_cpREACTOME %>%
 msigdb_cpBIOCARTA_filt <- msigdb_cpBIOCARTA %>%
   dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
 ```
-Enrichment
+clusterProfiler for enrichment analysis. Once again I am trying 3 different GSEAs: "shared", "uc" and "rc"
 ```{r}
 library(clusterProfiler)
 
+# df of distinct gene symbols
+# TERM2GENE is a data frame with first column of term ID and second column of corresponding mapped gene
 msigdb_cp_t2g = msigdb_cp_filt %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
 
+# Enrichment analysis step
+# input to gene can be a df column or a list, same with universe
 shared_enrich <- enricher(gene = unique(sig_top$hgnc_symbol), TERM2GENE = msigdb_cp_t2g, universe = uni$hgnc_symbol)
 shared_enrich_res <- shared_enrich@result %>%
+  # I am only interested in a gene set if at least 3 of my sig genes belong, and if the FDR is < 0.1
   dplyr::filter(Count > 3, p.adjust < 0.1)
 
 uc_enrich <- enricher(gene = unique(uc_top$hgnc_symbol), TERM2GENE = msigdb_cp_t2g, universe = uni$hgnc_symbol)
@@ -547,11 +567,7 @@ rc_enrich_res <- rc_enrich@result %>%
   dplyr::filter(Count > 3, p.adjust < 0.1) %>%
   mutate(model="rc")
 ```
-```{r}
-help("enricher")
-```
-
-
+Plot the results. Here I combined the results from my different enrichment tests "uc" and "rc"
 ```{r}
 enriched_pathways <- rbind(uc_enrich_res, rc_enrich_res) %>%
   mutate(db = case_when(
@@ -572,7 +588,7 @@ ggplot(enriched_pathways, aes(x=model, y=ID, color=model, size=neglog10_p.adjust
   theme_linedraw()
 ggsave("results/figs/RNAseq-urbanism/enriched_pathways.png", width=11, height=6.5)
 ```
-
+Now plotting just the results of the "shared" model
 ```{r}
 enriched_pathways_sharedgenesonly <- shared_enrich_res %>%
   mutate(db = case_when(
