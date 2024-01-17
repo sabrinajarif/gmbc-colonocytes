@@ -464,9 +464,18 @@ raw_read_cts_filt <- raw_read_cts_grp %>%
   as.matrix()
 write.csv(raw_read_cts_filt, "results/docs/raw_read_cts_filt.csv")
 
+raw_read_cts_filt_alt <- raw_read_cts_grp %>%
+  dplyr::filter(rowSums(dplyr::select(., -1)) >= 100) %>%
+  `row.names<-`(.,NULL) %>%
+  column_to_rownames("ensembl_gene_id") %>%
+  as.matrix()
+write.csv(raw_read_cts_filt, "results/docs/raw_read_cts_filt_alt.csv")
+
+
 # Count difference
 paste0("pre-filt: ", nrow(raw_read_cts_grp))
 paste0("post-filt: ", nrow(raw_read_cts_filt))
+paste0("post-filt: ", nrow(raw_read_cts_filt_alt))
 ```
 Columns of all zeros create issues. Also, make sure continuous numeric columns are indeed numeric. Before, I had Total.Reads classified as a factor, meaning that every read was given its own column which obviously matched to only one sample, which produced a linear relationship which gave rise to the "not full rank" error.
 

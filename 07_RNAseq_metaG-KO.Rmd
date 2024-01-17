@@ -1,0 +1,723 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(stringr)
+library(pheatmap)
+library(ensembldb)
+library(biomaRt)
+library(ggpubr)
+library(tidyverse)
+library(foreach)
+library(DESeq2)
+library(data.table)
+library(ALDEx2)
+```
+
+--------------------------------------------------------------------------------
+SETUP
+--------------------------------------------------------------------------------
+Load gene family data (in kegg IDs) and tidy up
+Information on KEGG orthology database: https://www.genome.jp/kegg/ko.html
+```{r}
+gene_families <- read.csv("data/metaG-functional/ko_genefam_combined.tsv", header =T, sep = "\t")
+gene_families2 <- gene_families %>%
+  # remove X from colnames
+  rename_all(~gsub("^X", "", .)) %>%
+  # remove "_Abundance.RPKs" string from colnames
+  rename_all(~str_remove(.x, "_Abundance.RPKs")) %>%
+  # rename first column
+  rename_at(1, ~"ko_id")
+```
+Import metadata
+```{r}
+meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) 
+# Identify missing samples
+remove_from_abun <- setdiff(colnames(gene_families2), meta$SampleName)
+remove_from_meta <- setdiff(meta$SampleName, colnames(gene_families2))
+# Clean up metadata specific for this analysis
+meta <- meta %>%
+  # exclude controls
+  dplyr::filter(!Luca_Lab_ID=="control") %>%
+  dplyr::filter(!SampleID==c("GMCC1S1", "GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
+  dplyr::filter(!SampleName=="4342XH") %>%
+  # exclude samples absent in pathway data
+  dplyr::filter(!SampleName %in% remove_from_meta) %>%
+  mutate(Batch = as.character(Batch)) %>%
+  mutate(urbanism2=ifelse(country=="USA", "USA_urban", urbanism)) %>%
+  mutate(SampleName2 = SampleName) %>%
+  column_to_rownames("SampleName2") %>%
+  dplyr::mutate(flag = case_when(
+    country == "Ghana" ~ "data/metaG-QC/flags/ghana.svg",
+    country == "Malaysia" ~ "data/metaG-QC/flags/malaysia.svg",
+    country == "Nigeria" ~ "data/metaG-QC/flags/nigeria.svg",
+    country == "Rwanda" ~ "data/metaG-QC/flags/rwanda.svg",
+    country == "USA" ~ "data/metaG-QC/flags/usa.svg"))
+meta <- meta[order(row.names(meta)), ]
+```
+```{r}
+gene_families_filt1 <- gene_families2 %>%
+  # for now, filter at the gene level, don't include microbe contributions
+  filter(!grepl("\\|", ko_id)) %>%
+  # also ditch the unmapped and ungrouped
+  filter(!ko_id == c("UNMAPPED", "UNGROUPED")) %>%
+  dplyr::select(ko_id, meta$SampleName)
+
+# sanity check to ensure that each row corresponds to one ko id
+nrow(gene_families_filt1)
+length(unique(gene_families_filt1$ko_id))
+```
+
+Let's just start with the KO ids before collapsing them into pathways.
+First perform mimimum filtering: remove genes with a count less than 10 in < 50% of rural OR < 50% of urban taxa.
+```{r}
+# Create list of the SampleIDs corresponding to different groups
+urbanism_urban <- unlist(subset(meta$SampleName, meta$urbanism == "urban"))
+urbanism_urban <- urbanism_urban[!(urbanism_urban %in% remove_from_meta)]
+urbanism_rural <- unlist(subset(meta$SampleName, meta$urbanism == "rural"))
+urbanism_rural <- urbanism_rural[!(urbanism_rural %in% remove_from_meta)]
+
+# Add columns to the counts matrix indicating the percentage of individuals with zero gene expression of each gene within a given group. 
+gene_families_minfilt <- gene_families_filt1 %>%
+  dplyr::mutate(c10_urbanism_urban = rowSums(across(all_of(urbanism_urban))<=10)/length(urbanism_urban)) %>%
+  dplyr::mutate(c10_urbanism_rural = rowSums(across(all_of(urbanism_rural))<=10)/length(urbanism_rural)) %>%
+# Keep pathways which have counts of < 10 in less than or equal to 50% of urban group samples OR [cutoff value]% of rural group samples
+  subset(c10_urbanism_urban <= 0.50 | c10_urbanism_rural <= 0.50) %>%
+  dplyr::select(-(starts_with("c10"))) %>%
+  as.matrix()
+  
+# Apply filtering
+gene_families_filt2 <- gene_families_filt1 %>% 
+  dplyr::filter(ko_id %in% gene_families_minfilt[,"ko_id"])
+
+paste("Total number of KO ids (filt cutoff = count > 10 in at least 50% urban OR rural)")
+paste("pre-filt: ", nrow(gene_families_filt1))
+paste0("post-filt: ", nrow(gene_families_filt2))
+```
+Visualize
+```{r}
+gene_families_filt2_r <- gene_families_filt2 %>% column_to_rownames("ko_id")
+gene_families_filt2_r[] <- lapply(gene_families_filt2_r, function(x) x / sum(x))
+
+pca_res_gf <- prcomp(t(gene_families_filt2_r), center = TRUE, scale. = TRUE)
+
+# Extract the principal components
+principal_components_gf <- as.data.frame(pca_res_gf$x[, 1:2]) %>%
+  rownames_to_column("SampleName") %>%
+  merge(meta[,c("SampleName", "urbanism", "flag", "country")], by="SampleName")
+variance_explained <- 100 * pca_res_gf$sdev^2 / sum(pca_res_gf$sdev^2)
+
+ggplot(principal_components_gf, aes(x = PC1, y = PC2)) +
+  geom_point() +
+  labs(x = paste("PC1 [", round(variance_explained[1], 2), "%]", sep = ""),
+       y = paste("PC2 [", round(variance_explained[2], 2), "%]", sep = "")) +
+  geom_point(aes(fill=urbanism), shape=21, size=3, stroke = 0.75) +
+  scale_fill_manual(values=c("#6FBD8B", "#7B2BC1"), name = "Population") + 
+  theme_linedraw() +
+  ggtitle("KO_id abundance of microbiomes (relative abundance)") +
+  theme(
+  axis.text = element_blank(),
+  axis.ticks = element_blank()
+  )
+```
+```{r}
+ggplot(principal_components_gf, aes(x = PC1, y = PC2, fill=country)) +
+  #geom_image(aes(image=flag), size=0.05) +
+  geom_point(aes(fill=country), shape=21, size=3, stroke = 0.75) +
+  labs(x = paste("PC1 [", round(variance_explained[1], 2), "%]", sep = ""),
+       y = paste("PC2 [", round(variance_explained[2], 2), "%]", sep = "")) +
+  theme_linedraw() +
+  ggtitle("KO_id abundance of microbiomes (relative abundance))") +
+  theme(
+  axis.text = element_blank(),
+  axis.ticks = element_blank()
+  )
+```
+ALDEX2 testing
+ALDEx2 for differential abundance testing.
+```{r}
+## Functions
+
+aldex2_func <- function(df) {
+  ALDEx2::aldex.clr(df %>% 
+                      column_to_rownames("ko_id") %>%
+                      mutate(across(everything(), round)), 
+                    meta$urbanism, 
+                    mc.samples=128, 
+                    denom="all", 
+                    verbose=F,
+                    useMC=T) }
+
+aldex2_cts <- function(aldex_obj){
+  x.counts <- getMonteCarloInstances(aldex_obj)
+  # Calculate row means for each nested list
+  row_means_list <- lapply(x.counts, function(i) {
+    data.frame(rowMeans(i))
+    })
+  row_means_list <- lapply(names(row_means_list), function(list_name) {
+    df <- row_means_list[[list_name]]
+    colnames(df) <- list_name
+    return(df)
+    })
+  # Convert the list of row means into a data frame and CLR transform
+  row_means_df <- dplyr::bind_cols(row_means_list)
+  return(row_means_df)
+}
+
+aldex2_res <- function(aldex_obj) {
+  x <- aldex_obj
+  x.tt <- aldex.ttest(x, hist.plot=F, paired.test=FALSE, verbose=FALSE)
+  x.effect <- aldex.effect(x, CI=T, verbose=F, include.sample.summary=F, 
+  paired.test=FALSE, glm.conds=NULL, useMC=F)
+  x.all <- data.frame(x.tt,x.effect)
+  return(x.all)
+}
+
+# Save as df
+aldex2_sig <- function(aldex2_res){
+  aldex2_res %>%
+    dplyr::filter(wi.eBH < 0.005) %>%
+    arrange(effect, wi.eBH)
+  }
+
+
+# Plot sig and non-sig results
+aldex2_plot <- function(aldex_result) {
+  ALDEx2::aldex.plot(aldex_result, type="MW", test="wilcox", called.cex = 1, cutoff = 0.01)
+}
+
+```
+```{r}
+# Create aldex2 object
+aldex2_clr_gf <- aldex2_func(gene_families_filt2)
+
+# Extract CLR-normalized counts
+aldex2_clr_cts_gf <- aldex2_cts(aldex2_clr_gf)
+
+# df of results
+aldex2_clr_res_gf <- aldex2_res(aldex2_clr_gf)
+
+# sig results only
+aldex2_clr_sig_gf <- aldex2_sig(aldex2_clr_res_gf)
+
+# plot
+aldex2_plot(aldex2_clr_res_gf)
+```
+Filter for pathways that were differentially abundant
+```{r}
+gene_families_filt3_r <- gene_families_filt2_r %>%
+  rownames_to_column("ko_id") %>%
+  dplyr::filter(ko_id %in% rownames(aldex2_clr_sig_gf)) %>%
+  column_to_rownames("ko_id")
+
+paste("Total number of KO ids (filt cutoff = FDR < 0.005)")
+paste("pre-filt: ", nrow(gene_families_filt2_r))
+paste0("post-filt: ", nrow(gene_families_filt3_r))
+```
+
+Now prepare for DESeq analysis
+```{r}
+gene_families_filt3_r_t <- t(gene_families_filt3_r) %>%
+  as.data.frame() %>%
+  rownames_to_column("SampleName")
+
+# Attach to metadata
+meta <- meta %>%
+  left_join(gene_families_filt3_r_t, by="SampleName") 
+meta <- meta[order(row.names(meta)), ]
+
+gene_families_filt3_r_t_melt <- gene_families_filt3_r_t %>%
+  pivot_longer(
+    cols = -c("SampleName"),
+    names_to = "ko_id",
+    values_to = "ko_id_abundance_r"
+  ) %>%
+  mutate(SampleName_ko_id = paste(SampleName, ko_id, sep = ";")) 
+
+# Covariates
+covariates <- "Batch"
+gene_families_covariates_list <- paste(covariates, colnames(gene_families_filt3_r_t), sep = " + ")
+
+gene_families_covariates_list <- paste("~", gene_families_covariates_list) 
+gene_families_covariates_list <- lapply(gene_families_covariates_list, function(x) as.formula(x))
+
+# name
+names(gene_families_covariates_list) <- colnames(gene_families_filt3_r_t)
+# remove unwanted elements
+gene_families_covariates_list[['SampleName']] <- NULL
+```
+Load raw read counts
+```{r}
+raw_read_cts_filt <- read.csv("results/docs/raw_read_cts_filt.csv", row.names=1) 
+raw_read_cts_filt <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% meta$SampleID]
+raw_read_cts_filt <- raw_read_cts_filt[, order(colnames(raw_read_cts_filt))]
+```
+Separate into urban-only and rural-only
+```{r}
+meta_urban <- meta %>% dplyr::filter(urbanism=="urban")
+meta_urban <- meta_urban[order(row.names(meta_urban)), ]
+
+meta_rural <- meta %>% dplyr::filter(urbanism=="rural")
+meta_rural <- meta_rural[order(row.names(meta_rural)), ]
+
+raw_read_cts_filt_urban <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% meta_urban$SampleID]
+raw_read_cts_filt_urban <- raw_read_cts_filt_urban[, order(colnames(raw_read_cts_filt_urban))]
+
+raw_read_cts_filt_rural <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% meta_rural$SampleID]
+raw_read_cts_filt_rural <- raw_read_cts_filt_rural[, order(colnames(raw_read_cts_filt_rural))]
+```
+Function for running DESeq using each formula as a design
+```{r}
+DESeq_func <- function(x,y,z){
+  DESeq(
+    DESeqDataSetFromMatrix(
+      countData = y,#raw_read_cts_filt,
+      colData = z, #meta,
+      design= x),
+      quiet=T # silences progress messages; easier to see progress bar in the loop
+  )}
+```
+Run on HPC
+
+First save everything to file
+```{r}
+#saveRDS(DESeq_func, "data/for_hpc/DESeq_func_gf.rds")
+#saveRDS(gene_families_covariates_list, "data/for_hpc/gene_families_covariates_list_gf.rds")
+#saveRDS(raw_read_cts_filt, "data/for_hpc/raw_read_cts_filt_gf.rds")
+#saveRDS(raw_read_cts_filt_urban, "data/for_hpc/raw_read_cts_filt_urban_gf.rds")
+#saveRDS(raw_read_cts_filt_rural, "data/for_hpc/raw_read_cts_filt_rural_gf.rds")
+#saveRDS(meta, "data/for_hpc/meta_gf.rds")
+#saveRDS(meta_urban, "data/for_hpc/meta_urban_gf.rds")
+#saveRDS(meta_rural, "data/for_hpc/meta_rural_gf.rds")
+```
+rsync every .rds file in the for_hpc folder (can run directly from here)
+```{bash}
+#scp -r data/for_hpc/*.rds sjarif@midway3-login4.rcc.uchicago.edu:/project/blekhman/sjarif/GMbC/DESeq/input_rds_files
+```
+Now create R script and save to /R_files. Alter based on model of interest.
+```{R}
+library(DESeq2)
+library(tidyverse)
+library(foreach)
+library(doParallel)
+
+# make sure this is same as number of cpus requested
+registerDoParallel(cores=8)
+
+DESeq_func <- readRDS("/project/blekhman/sjarif/GMbC/DESeq/input_rds_files/DESeq_func_gf.rds")
+gene_families_covariates_list <- readRDS("/project/blekhman/sjarif/GMbC/DESeq/input_rds_files/gene_families_covariates_list_gf.rds")
+
+#raw_read_cts_filt <- readRDS("/project/blekhman/sjarif/GMbC/DESeq/input_rds_files/raw_read_cts_filt_gf.rds")
+#raw_read_cts_filt <- readRDS("/project/blekhman/sjarif/GMbC/DESeq/input_rds_files/raw_read_cts_filt_urban_gf.rds")
+raw_read_cts_filt <- readRDS("/project/blekhman/sjarif/GMbC/DESeq/input_rds_files/raw_read_cts_filt_rural_gf.rds")
+
+#meta <- readRDS("/project/blekhman/sjarif/GMbC/DESeq/input_rds_files/meta_gf.rds")
+#meta <- readRDS("/project/blekhman/sjarif/GMbC/DESeq/input_rds_files/meta_urban_gf.rds")
+meta <- readRDS("/project/blekhman/sjarif/GMbC/DESeq/input_rds_files/meta_rural_gf.rds")
+
+
+x <- gene_families_covariates_list
+dds_list <- foreach(
+  i=seq_along(x),
+  .packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %dopar% {
+    tryCatch({
+      y <- DESeq_func(x[[i]], raw_read_cts_filt, meta)}, 
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  } 
+  
+#saveRDS(dds_list, "/project/blekhman/sjarif/GMbC/DESeq/output_rds_files/dds_list_gf.rds")
+#saveRDS(dds_list, "/project/blekhman/sjarif/GMbC/DESeq/output_rds_files/dds_list_urban_gf.rds")
+saveRDS(dds_list, "/project/blekhman/sjarif/GMbC/DESeq/output_rds_files/dds_list_rural_gf.rds")
+```
+```{r}
+# Assuming 'meta' is your data frame
+if (all(names(gene_families_covariates_list) %in% colnames(meta))) {
+  print("All names are present in the columns of 'meta'")
+} else {
+  print("Some names are missing in the columns of 'meta'")
+}
+```
+
+Create bash file in /scripts to run R file
+```{bash}
+#!/bin/bash      
+#SBATCH --time=24:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=60g
+#SBATCH -p blekhman
+#SBATCH --account pi-blekhman
+#SBATCH --mail-type=ALL  
+#SBATCH --mail-user=sjarif@uchicago.edu
+
+# Load the necessary modules if needed
+module load R
+conda activate /home/sjarif/.conda/envs/deseq_env
+
+# Run the R script using Rscript
+#Rscript /project/blekhman/sjarif/GMbC/DESeq/R_files/dds_gf.R
+#Rscript /project/blekhman/sjarif/GMbC/DESeq/R_files/dds_urban_gf.R
+Rscript /project/blekhman/sjarif/GMbC/DESeq/R_files/dds_rural_gf.R
+```
+Check the resources that were used. According to this it took 12 minutes and used at max 16G RAM
+```{bash}
+# JUST AN EXAMPLE
+sacct -j 9894616 --format=JobID,JobName,MaxRSS,Elapsed,UserCPU
+```
+Download and proceed as normal (better to run this in terminal from local drive so you can see progress)
+```{bash}
+scp -r sjarif@midway3.rcc.uchicago.edu:/project/blekhman/sjarif/GMbC/DESeq/output_rds_files/dds_list_gf.rds /Users/sabri/Documents/GitHub/gmbc-colonocytes/results/rds
+
+scp -r sjarif@midway3.rcc.uchicago.edu:/project/blekhman/sjarif/GMbC/DESeq/output_rds_files/dds_list_rural_gf.rds /Users/sabri/Documents/GitHub/gmbc-colonocytes/results/rds
+
+scp -r sjarif@midway3.rcc.uchicago.edu:/project/blekhman/sjarif/GMbC/DESeq/output_rds_files/dds_list_urban_gf.rds /Users/sabri/Documents/GitHub/gmbc-colonocytes/results/rds
+```
+Read in files
+```{r}
+dds_list <- readRDS("/Users/sabri/Documents/GitHub/gmbc-colonocytes/results/rds/dds_list_gf.rds")
+dds_list_urban <- readRDS("/Users/sabri/Documents/GitHub/gmbc-colonocytes/results/rds/dds_list_urban_gf.rds")
+dds_list_rural <- readRDS("/Users/sabri/Documents/GitHub/gmbc-colonocytes/results/rds/dds_list_rural_gf.rds")
+```
+
+Analyze results
+```{r}
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+
+# Convert DESeq results into table
+res2table <- function(ddsobject){
+  results(ddsobject)  %>%
+  as.data.frame() %>%
+  rownames_to_column("ensembl_gene_id") }
+
+# Define annotations
+att_interest <- c("ensembl_gene_id", "description", "hgnc_symbol") #"ensembl_transcript_id", 
+
+# Annotate 
+annotate_ensembl <- function(resdf){biomaRt::getBM(
+  attributes = att_interest, 
+  filters = "ensembl_gene_id",
+  values = resdf$ensembl_gene_id, 
+  mart = ensembl) %>%
+  left_join(resdf, by="ensembl_gene_id")
+}
+```
+Loop through list of DESeq objects and generate result tables
+```{r}
+dds_list_filt <- Filter(Negate(is.null), dds_list)
+
+x <- dds_list_filt
+res_list <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <- res2table(x[[i]])},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+```
+Urban only
+```{r}
+dds_list_filt_urban <- Filter(Negate(is.null), dds_list_urban)
+
+x <- dds_list_filt_urban
+res_list_urban <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <- res2table(x[[i]])},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+```
+
+Rural only
+```{r}
+dds_list_filt_rural <- Filter(Negate(is.null), dds_list_rural)
+
+x <- dds_list_filt_rural
+res_list_rural <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <- res2table(x[[i]])},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+```
+
+Filter for genes with an FDR <= 0.1
+```{r}
+x <- res_list
+sig_list <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::filter(x[[i]], padj < 0.1 ) 
+      #%>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+sig_list_filt <- Filter(NROW, sig_list)
+```
+Urban only
+```{r}
+x <- res_list_urban
+sig_list_urban <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::filter(x[[i]], padj < 0.1 ) 
+      #%>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+sig_list_filt_urban <- Filter(NROW, sig_list_urban)
+```
+Rural only
+```{r}
+x <- res_list_rural
+sig_list_rural <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::filter(x[[i]], padj < 0.1 ) 
+      #%>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+sig_list_filt_rural <- Filter(NROW, sig_list_rural)
+```
+
+Append model name to each dataframe
+```{r}
+x <- sig_list_filt
+sig_list_filt_names <- foreach(
+  i=seq_along(x),
+  n=names(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::mutate(x[[i]], microbe = n) %>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+```
+Urban only
+```{r}
+x <- sig_list_filt_urban
+sig_list_filt_names_urban <- foreach(
+  i=seq_along(x),
+  n=names(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::mutate(x[[i]], microbe = n) %>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+```
+Rural only
+```{r}
+x <- sig_list_filt_rural
+sig_list_filt_names_rural <- foreach(
+  i=seq_along(x),
+  n=names(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::mutate(x[[i]], microbe = n) %>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+```
+
+Flatten this list of dfs
+```{r}
+sig_list_df <- bind_rows(sig_list_filt_names) %>%
+  dplyr::select(ensembl_gene_id, microbe, everything()) %>%
+  mutate(l2fc_dir = case_when(log2FoldChange > 0 ~ "U",
+                               log2FoldChange < 0 ~ "D")) #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+```
+
+Urban only
+```{r}
+sig_list_df_urban <- bind_rows(sig_list_filt_names_urban) %>%
+  dplyr::select(ensembl_gene_id, microbe, everything()) %>%
+  mutate(l2fc_dir = case_when(log2FoldChange > 0 ~ "U",
+                               log2FoldChange < 0 ~ "D")) #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+```
+Rural only
+```{r}
+sig_list_df_rural <- bind_rows(sig_list_filt_names_rural) %>%
+  dplyr::select(ensembl_gene_id, microbe, everything()) %>%
+  mutate(l2fc_dir = case_when(log2FoldChange > 0 ~ "U",
+                               log2FoldChange < 0 ~ "D")) #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+```
+
+
+Summary df: rows are microbes
+```{r}
+# New df; fill will empty rows that correspond to number of models
+sig_list_summary <- data.frame(n_genes=numeric(0)) 
+sig_list_summary[nrow(sig_list_summary)+length(sig_list_filt),] <- NA
+# Assign rownames based on sigres_list
+rownames(sig_list_summary) <- names(sig_list_filt)
+sig_list_summary$microbe <- row.names(sig_list_summary)
+# Loop through each sig list
+sig_list_summary$n_genes <- as.numeric(lapply(sig_list_filt, function(x) length(unique(x[["ensembl_gene_id"]]))))
+# list unique gene IDs
+sig_list_summary$genes <- lapply(sig_list_filt, function(x) str_c(unique(x[["ensembl_gene_id"]]), collapse = ";"))
+
+# Step 1: Merge generaspecies_sig_list_summary with sig_list_df to obtain log2FoldChange values
+merged_df <- merge(sig_list_summary, sig_list_df, by = "microbe")
+
+# Step 2: Group the merged dataframe by "model" and "ensembl_gene_id" and count the number of genes that are upregulated and downregulated
+#detach(package:plyr)
+counts_df <- merged_df %>%
+  group_by(microbe) %>%
+  summarise(n_U = sum(l2fc_dir == "U"),
+            n_D = sum(l2fc_dir == "D")) 
+
+# Step 4: Merge the summary dataframe with generaspecies_sig_list_summary to add the n_U and n_D columns
+sig_list_summary <- merge(sig_list_summary, counts_df, by = "microbe") #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+
+```
+Urban only
+```{r}
+# New df; fill will empty rows that correspond to number of models
+sig_list_summary_urban <- data.frame(n_genes=numeric(0)) 
+sig_list_summary_urban[nrow(sig_list_summary_urban)+length(sig_list_filt_urban),] <- NA
+# Assign rownames based on sigres_list
+rownames(sig_list_summary_urban) <- names(sig_list_filt_urban)
+sig_list_summary_urban$microbe <- row.names(sig_list_summary_urban)
+# Loop through each sig list
+sig_list_summary_urban$n_genes <- as.numeric(lapply(sig_list_filt_urban, function(x) length(unique(x[["ensembl_gene_id"]]))))
+# list unique gene IDs
+sig_list_summary_urban$genes <- lapply(sig_list_filt_urban, function(x) str_c(unique(x[["ensembl_gene_id"]]), collapse = ";"))
+
+# Step 1: Merge generaspecies_sig_list_summary with sig_list_df to obtain log2FoldChange values
+merged_df_urban <- merge(sig_list_summary_urban, sig_list_df_urban, by = "microbe")
+
+# Step 2: Group the merged dataframe by "model" and "ensembl_gene_id" and count the number of genes that are upregulated and downregulated
+#detach(package:plyr)
+counts_df_urban <- merged_df_urban %>%
+  group_by(microbe) %>%
+  summarise(n_U = sum(l2fc_dir == "U"),
+            n_D = sum(l2fc_dir == "D")) 
+
+# Step 4: Merge the summary dataframe with generaspecies_sig_list_summary to add the n_U and n_D columns
+sig_list_summary_urban <- merge(sig_list_summary_urban, counts_df_urban, by = "microbe") #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                # microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+
+```
+Rural only
+```{r}
+# New df; fill will empty rows that correspond to number of models
+sig_list_summary_rural <- data.frame(n_genes=numeric(0)) 
+sig_list_summary_rural[nrow(sig_list_summary_rural)+length(sig_list_filt_rural),] <- NA
+# Assign rownames based on sigres_list
+rownames(sig_list_summary_rural) <- names(sig_list_filt_rural)
+sig_list_summary_rural$microbe <- row.names(sig_list_summary_rural)
+# Loop through each sig list
+sig_list_summary_rural$n_genes <- as.numeric(lapply(sig_list_filt_rural, function(x) length(unique(x[["ensembl_gene_id"]]))))
+# list unique gene IDs
+sig_list_summary_rural$genes <- lapply(sig_list_filt_rural, function(x) str_c(unique(x[["ensembl_gene_id"]]), collapse = ";"))
+
+# Step 1: Merge generaspecies_sig_list_summary with sig_list_df to obtain log2FoldChange values
+merged_df_rural <- merge(sig_list_summary_rural, sig_list_df_rural, by = "microbe")
+
+# Step 2: Group the merged dataframe by "model" and "ensembl_gene_id" and count the number of genes that are upregulated and downregulated
+#detach(package:plyr)
+counts_df_rural <- merged_df_rural %>%
+  group_by(microbe) %>%
+  summarise(n_U = sum(l2fc_dir == "U"),
+            n_D = sum(l2fc_dir == "D")) 
+
+# Step 4: Merge the summary dataframe with generaspecies_sig_list_summary to add the n_U and n_D columns
+sig_list_summary_rural <- merge(sig_list_summary_rural, counts_df_rural, by = "microbe") #%>%
+  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
+                                # microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+
+```
+
+
+Summary df: rows are genes
+```{r}
+gene_list_summary <- sig_list_df %>%
+  group_by(hgnc_symbol) %>%
+  summarise(
+    n_microbes = n(),
+            urban_U = sum(DA_urbanism == "urban" & l2fc_dir=="U"),
+            urban_D = sum(DA_urbanism == "urban" & l2fc_dir=="D"),
+            rural_U = sum(DA_urbanism == "rural" & l2fc_dir=="U"),
+            rural_D= sum(DA_urbanism == "rural" & l2fc_dir=="D"))
+
+gene_list_summary_plot <- gene_list_summary %>%
+  mutate(hgnc_symbol = factor(hgnc_symbol, levels = unique(hgnc_symbol))) %>%
+  #dplyr::filter(n_microbes >= 10) %>%
+  pivot_longer(cols = c(urban_U, urban_D, rural_U, rural_D),
+               names_to = c("DA_urbanism", "l2fc_dir"),
+               names_pattern = "(.*?)_(.*)",
+               values_to = "count")
+```
+Urban only
+```{r}
+gene_list_summary_urban <- sig_list_df_urban %>%
+  group_by(hgnc_symbol) %>%
+  summarise(
+    n_microbes = n(),
+            urban_U = sum(DA_urbanism == "urban" & l2fc_dir=="U"),
+            urban_D = sum(DA_urbanism == "urban" & l2fc_dir=="D"),
+            rural_U = sum(DA_urbanism == "rural" & l2fc_dir=="U"),
+            rural_D= sum(DA_urbanism == "rural" & l2fc_dir=="D"))
+
+gene_list_summary_plot_urban <- gene_list_summary_urban %>%
+  mutate(hgnc_symbol = factor(hgnc_symbol, levels = unique(hgnc_symbol))) %>%
+  #dplyr::filter(n_microbes >= 10) %>%
+  pivot_longer(cols = c(urban_U, urban_D, rural_U, rural_D),
+               names_to = c("DA_urbanism", "l2fc_dir"),
+               names_pattern = "(.*?)_(.*)",
+               values_to = "count")
+```
+Rural only
+```{r}
+gene_list_summary_rural <- sig_list_df_rural %>%
+  group_by(hgnc_symbol) %>%
+  summarise(
+    n_microbes = n(),
+            urban_U = sum(DA_urbanism == "urban" & l2fc_dir=="U"),
+            urban_D = sum(DA_urbanism == "urban" & l2fc_dir=="D"),
+            rural_U = sum(DA_urbanism == "rural" & l2fc_dir=="U"),
+            rural_D= sum(DA_urbanism == "rural" & l2fc_dir=="D"))
+
+gene_list_summary_plot_rural <- gene_list_summary_rural %>%
+  mutate(hgnc_symbol = factor(hgnc_symbol, levels = unique(hgnc_symbol))) %>%
+  #dplyr::filter(n_microbes >= 10) %>%
+  pivot_longer(cols = c(urban_U, urban_D, rural_U, rural_D),
+               names_to = c("DA_urbanism", "l2fc_dir"),
+               names_pattern = "(.*?)_(.*)",
+               values_to = "count")
+```
+

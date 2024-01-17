@@ -21,72 +21,16 @@ library(dplyr)
 SETUP
 --------------------------------------------------------------------------------
 
-Load interesting microbe lists
-```{r}
-microbe_lists <- readRDS("results/docs/microbe_lists.rds")
-```
-Import metadata
-```{r}
-genusspecies_clr_abundance <- read.csv("results/docs/genusspecies_clr_abundance.csv") %>%
-  dplyr::rename(SampleName=X)
-genusspecies_css_abundance <- read.csv("results/docs/genusspecies_css_abundance.csv") %>%
-  dplyr::rename(SampleName=X)
-
-genusspecies_clr_abundance_melt <- genusspecies_clr_abundance %>%
-  pivot_longer(
-    cols = -c("SampleName"),
-    names_to = "microbe",
-    values_to = "microbe_abundance_CLR"
-  ) %>%
-  mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) 
-
-genusspecies_css_abundance_melt <- genusspecies_css_abundance %>%
-  pivot_longer(
-    cols = -c("SampleName"),
-    names_to = "microbe",
-    values_to = "microbe_abundance_CSS"
-  ) %>%
-  mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) 
-
-meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
-  left_join(genusspecies_clr_abundance, by="SampleName") %>%
-  # Batch as character
-  mutate(Batch = as.character(Batch)) %>%
-  # exclude controls
-  dplyr::filter(!Luca_Lab_ID=="control") %>%
-  dplyr::filter(!SampleID==c("GMCC1S1", "GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
-  dplyr::filter(!SampleName=="4342XH")
-meta <- meta[order(row.names(meta)), ]
-```
-Choose microbe list for DE testing
-```{r}
-microbe_list <- unlist(microbe_lists[["diffabun_g"]]["all"])
-
-#covariates <- "Batch"
-# For interaction term
-covariates <- "Batch"
-
-microbe_covariates_list <- paste(covariates, microbe_list, sep = "+")
-#microbe_covariates_list <- paste(covariates, microbe_list, sep = "+")
-#microbe_covariates_list <- paste(microbe_covariates_list, "urbanism", sep = "+")
-#microbe_covariates_list <- paste(microbe_covariates_list, microbe_list, sep = ":")
-
-microbe_covariates_list <- paste("~", microbe_covariates_list) 
-
-names(microbe_covariates_list) <- unlist(microbe_lists[["diffabun_g"]]["all"])
-
-microbe_covariates_list <- lapply(microbe_covariates_list, function(x) as.formula(x))
-```
-
-
-
-
-NEW AS OF 11/8
 Load CLR-transformed abundances of microbes of interest
 ```{r}
 # Read in CLR abundances of microbes
-DA_microbe_abundances <- read.csv("results/docs/DA_microbe_abundances.csv", row.names = 1)
+#DA_microbe_abundances <- read.csv("results/docs/DA_microbe_abundances_phyclr.csv", row.names = 1)
+DA_microbe_abundances <- read.csv("results/docs/DA_microbe_abundances_relativeabun.csv", row.names = 1)
 DA_microbe_abundances2 <- DA_microbe_abundances %>% rownames_to_column("SampleName")
+
+# ALDEx2 data
+aldex2_clr_all_sig <- read.csv("results/docs/DA_microbe_aldex2.csv", row.names = 1) %>%
+  rownames_to_column("microbe")
 
 # Attach to metadata
 meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
@@ -95,8 +39,15 @@ meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
   mutate(Batch = as.character(Batch)) %>%
   # exclude controls
   dplyr::filter(!Luca_Lab_ID=="control") %>%
-  dplyr::filter(!SampleID==c("GMCC1S1", "GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
-  dplyr::filter(!SampleName=="4342XH")
+  # This sample was bad quality 
+  dplyr::filter(!SampleID %in% c("GMCC1S1")) %>%
+  # These samples were outliers amongst the RNAseq
+  dplyr::filter(!SampleID %in% c("GMCC4S10", "GMCC3S7", "GMCC4C6", "GMCC5C5", "GMCC5C4", "GMCC5C3")) %>%
+  # These samples were not used to treat the colonocytes
+  dplyr::filter(!SampleName %in% c("1127XT", "1462QI", "3364PX", "3553XK", "3606IJ", "9423WC")) %>%
+  # These samples did not have metagenomic sequencing data
+  dplyr::filter(!SampleID %in% c("GMCC1S6", "GMCC2S3", "GMCC4S7"))
+  #dplyr::filter(!SampleName=="4342XH")
 meta <- meta[order(row.names(meta)), ]
 
 DA_microbe_abundances2_melt <- DA_microbe_abundances2 %>%
@@ -105,7 +56,8 @@ DA_microbe_abundances2_melt <- DA_microbe_abundances2 %>%
     names_to = "microbe",
     values_to = "microbe_abundance_CLR"
   ) %>%
-  mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) 
+  mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) %>%
+  left_join(aldex2_clr_all_sig, by="microbe")
 
 # Covariates
 covariates <- "Batch"
@@ -118,6 +70,34 @@ microbe_covariates_list <- paste("~", microbe_covariates_list)
 microbe_covariates_list <- lapply(microbe_covariates_list, function(x) as.formula(x))
 
 names(microbe_covariates_list) <- colnames(DA_microbe_abundances)
+```
+Preview microbes we are testing
+```{r}
+ggplot(aldex2_clr_all_sig, aes(x=DA_urbanism)) +
+  geom_bar(stat = "count") +
+  xlab("Population in which microbe is differentially abundant") +
+  ylab("Number of microbes") +
+  ggtitle("Differentially abundant microbes (n=178)")
+```
+Effect sizes
+```{r}
+ggplot(aldex2_clr_all_sig, aes(x=DA_urbanism, y=abs(effect))) +
+  geom_boxplot() +
+  geom_jitter() +
+  xlab("Population in which microbe is differentially abundant") +
+  ylab("Effect size") +
+  ggtitle("Differentially abundant microbes (n=178)")
+```
+Phylogenetic level
+```{r}
+aldex2_clr_all_sig$tax <- factor(aldex2_clr_all_sig$tax, levels=c("p", "c", "o", "f", "g", "s"))
+
+ggplot(aldex2_clr_all_sig, aes(x=DA_urbanism, fill=tax)) +
+  geom_bar(stat="count") +
+  labs(fill = "Phylogenetic level") +
+  xlab("Population in which microbe is differentially abundant") +
+  ylab("Number of microbes") +
+  ggtitle("Differentially abundant microbes (n=178)")
 ```
 
 Load raw read counts
@@ -155,6 +135,47 @@ DESeq_func_generaspecies <- function(x,y,z){
       quiet=T # silences progress messages; easier to see progress bar in the loop
   )}
 ```
+edgeR for comparison
+```{r}
+library(edgeR)
+
+# Assuming 'raw_read_cts_filt' is your count matrix and 'meta' is your metadata
+# If not, replace them with your actual count matrix and metadata
+edgeR_func <- function(counts_matrix, metadata_df, variable){
+  
+# Create a DGEList object
+meta <- metadata_df
+dge <- DGEList(counts = counts_matrix, group = meta$Batch)
+
+# Filter low-abundance genes if needed
+# You can adjust the threshold as per your data
+keep <- rowSums(cpm(dge) > 1) >= 3
+dge <- dge[keep, ]
+
+# Define design matrix
+design <- model.matrix(variable, data = meta)
+
+# Estimate dispersion
+dge <- estimateDisp(dge, design)
+
+# Fit the generalized linear model
+fit <- glmFit(dge, design)
+
+# Perform likelihood ratio test
+lrt <- glmLRT(fit, coef = 2)
+
+# Extract results
+results <- topTags(lrt, n = nrow(dge))$table
+
+# Adjust p-values if needed
+# results$PValue <- p.adjust(results$PValue, method = "BH")
+
+# Print the results
+return(results)
+}
+
+```
+
 
 First set up a parallel backend so the models can be run in parallel. 
 Source: https://www.blasbenito.com/post/02_parallelizing_loops_with_r/
@@ -183,6 +204,18 @@ dds_list <- foreach(
       error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
     } 
 ```
+edgeR
+```{r}
+x <- microbe_covariates_list
+edgeR_list <- foreach(
+  i=seq_along(x),
+  .packages='edgeR',
+  .final = function(i) setNames(i, names(x))) %dopar% {
+    tryCatch({
+      y <- edgeR_func(raw_read_cts_filt, meta, x[[i]])},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+    } 
+```
 Urban only
 ```{r}
 x <- microbe_covariates_list
@@ -195,6 +228,19 @@ dds_list_urban <- foreach(
       error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
     } 
 ```
+edgeR
+```{r}
+x <- microbe_covariates_list
+edgeR_list_urban <- foreach(
+  i=seq_along(x),
+  .packages='edgeR',
+  .final = function(i) setNames(i, names(x))) %dopar% {
+    tryCatch({
+      y <- edgeR_func(raw_read_cts_filt_urban, meta_urban, x[[i]])},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+    } 
+```
+
 
 Rural only
 ```{r}
@@ -208,8 +254,21 @@ dds_list_rural <- foreach(
       error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
     } 
 ```
+edgeR
+```{r}
+x <- microbe_covariates_list
+edgeR_list_rural <- foreach(
+  i=seq_along(x),
+  .packages='edgeR',
+  .final = function(i) setNames(i, names(x))) %dopar% {
+    tryCatch({
+      y <- edgeR_func(raw_read_cts_filt_rural, meta_rural, x[[i]])},
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+    } 
+```
 ```{r}
 # Save RDS object
+saveRDS(dds_list, "results/rds/dds_list.rds")
 saveRDS(dds_list_urban, "results/rds/dds_list_urban.rds")
 saveRDS(dds_list_rural, "results/rds/dds_list_rural.rds")
 ```
@@ -304,15 +363,22 @@ scp -r sjarif@midway3.rcc.uchicago.edu:gmbc_colonocytes/05_RNAseq-metaG-microbe/
 
 Back to local
 ```{r}
+dds_list <- readRDS("results/rds/dds_list.rds")
 dds_list_urban <- readRDS("results/rds/dds_list_urban.rds")
 dds_list_rural <- readRDS("results/rds/dds_list_rural.rds")
 ```
+Examine cooks
 ```{r}
-ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+maxCooks <- apply(assays(dds_list_rural[[1]])[["cooks"]], 1, max)
+head(maxCooks)
+```
+
+```{r}
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", host="jul2023.archive.ensembl.org")
 
 # Convert DESeq results into table
 res2table <- function(ddsobject){
-  results(ddsobject)  %>%
+  results(ddsobject, cooksCutoff=T)  %>%
   as.data.frame() %>%
   rownames_to_column("ensembl_gene_id") }
 
@@ -356,7 +422,6 @@ res_list_urban <- foreach(
       error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
   }
 ```
-
 Rural only
 ```{r}
 dds_list_filt_rural <- Filter(Negate(is.null), dds_list_rural)
@@ -388,6 +453,22 @@ sig_list <- foreach(
 
 sig_list_filt <- Filter(NROW, sig_list)
 ```
+edgeR
+```{r}
+x <- edgeR_list
+edgeR_sig_list <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::filter(x[[i]], FDR < 0.1 ) 
+      #%>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+edgeR_sig_list_filt <- Filter(NROW, edgeR_sig_list)
+```
 Urban only
 ```{r}
 x <- res_list_urban
@@ -403,6 +484,22 @@ sig_list_urban <- foreach(
   }
 
 sig_list_filt_urban <- Filter(NROW, sig_list_urban)
+```
+edgeR
+```{r}
+x <- edgeR_list_urban
+edgeR_sig_list_urban <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::filter(x[[i]], FDR < 0.1 ) 
+      #%>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+edgeR_sig_list_filt_urban <- Filter(NROW, edgeR_sig_list_urban)
 ```
 Rural only
 ```{r}
@@ -420,6 +517,49 @@ sig_list_rural <- foreach(
 
 sig_list_filt_rural <- Filter(NROW, sig_list_rural)
 ```
+edgeR
+```{r}
+x <- edgeR_list_rural
+edgeR_sig_list_rural <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::filter(x[[i]], FDR < 0.1 ) 
+      #%>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+edgeR_sig_list_filt_rural <- Filter(NROW, edgeR_sig_list_rural)
+```
+
+Summary
+```{r}
+cat("all colonocytes - number of microbes", "\n")
+cat("deseq:", length(sig_list_filt), "  edgeR:", length(edgeR_sig_list_filt), "\n")
+cat("urban colonocytes - number of microbes", "\n")
+cat("deseq:", length(sig_list_filt_urban), "   edgeR:", length(edgeR_sig_list_filt_urban), "\n")
+cat("rural colonocytes - number of microbes", "\n")
+cat("deseq:", length(sig_list_filt_rural), "   edgeR:", length(edgeR_sig_list_filt_rural))
+```
+```{r}
+cat("all colonocytes - shared microbes", "\n")
+cat("unique to deseq:", length(setdiff(names(sig_list_filt), names(edgeR_sig_list_filt))),
+    "  unique to edgeR:", length(setdiff(names(edgeR_sig_list_filt), names(sig_list_filt))),
+    "  shared:", length(intersect(names(sig_list_filt), names(edgeR_sig_list_filt))), "\n")
+
+cat("urban colonocytes - shared microbes", "\n")
+cat("unique to deseq:", length(setdiff(names(sig_list_filt_urban), names(edgeR_sig_list_filt_urban))),
+    "  unique to edgeR:", length(setdiff(names(edgeR_sig_list_filt_urban), names(sig_list_filt_urban))),
+    "  shared:", length(intersect(names(sig_list_filt_urban), names(edgeR_sig_list_filt_urban))), "\n")
+
+cat("rural colonocytes - shared microbes", "\n")
+cat("unique to deseq:", length(setdiff(names(sig_list_filt_rural), names(edgeR_sig_list_filt_rural))),
+    "  unique to edgeR:", length(setdiff(names(edgeR_sig_list_filt_rural), names(sig_list_filt_rural))),
+    "  shared:", length(intersect(names(sig_list_filt_rural), names(edgeR_sig_list_filt_rural))), "\n")
+```
+
 
 Append model name to each dataframe
 ```{r}
@@ -472,9 +612,8 @@ Flatten this list of dfs
 sig_list_df <- bind_rows(sig_list_filt_names) %>%
   dplyr::select(ensembl_gene_id, microbe, everything()) %>%
   mutate(l2fc_dir = case_when(log2FoldChange > 0 ~ "U",
-                               log2FoldChange < 0 ~ "D")) #%>%
-  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
-                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+                               log2FoldChange < 0 ~ "D")) %>%
+  left_join(aldex2_clr_all_sig[c("microbe", "DA_urbanism")], by="microbe")
 ```
 
 Urban only
@@ -482,18 +621,16 @@ Urban only
 sig_list_df_urban <- bind_rows(sig_list_filt_names_urban) %>%
   dplyr::select(ensembl_gene_id, microbe, everything()) %>%
   mutate(l2fc_dir = case_when(log2FoldChange > 0 ~ "U",
-                               log2FoldChange < 0 ~ "D")) #%>%
-  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
-                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+                               log2FoldChange < 0 ~ "D")) %>%
+  left_join(aldex2_clr_all_sig[c("microbe", "DA_urbanism")], by="microbe")
 ```
 Rural only
 ```{r}
 sig_list_df_rural <- bind_rows(sig_list_filt_names_rural) %>%
   dplyr::select(ensembl_gene_id, microbe, everything()) %>%
   mutate(l2fc_dir = case_when(log2FoldChange > 0 ~ "U",
-                               log2FoldChange < 0 ~ "D")) #%>%
-  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
-                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+                               log2FoldChange < 0 ~ "D")) %>%
+  left_join(aldex2_clr_all_sig[c("microbe", "DA_urbanism")], by="microbe")
 ```
 
 
@@ -521,9 +658,8 @@ counts_df <- merged_df %>%
             n_D = sum(l2fc_dir == "D")) 
 
 # Step 4: Merge the summary dataframe with generaspecies_sig_list_summary to add the n_U and n_D columns
-sig_list_summary <- merge(sig_list_summary, counts_df, by = "microbe") #%>%
-  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
-                                 #microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+sig_list_summary <- merge(sig_list_summary, counts_df, by = "microbe") %>%
+  left_join(aldex2_clr_all_sig[c("microbe", "DA_urbanism")], by="microbe")
 
 ```
 Urban only
@@ -550,9 +686,8 @@ counts_df_urban <- merged_df_urban %>%
             n_D = sum(l2fc_dir == "D")) 
 
 # Step 4: Merge the summary dataframe with generaspecies_sig_list_summary to add the n_U and n_D columns
-sig_list_summary_urban <- merge(sig_list_summary_urban, counts_df_urban, by = "microbe") #%>%
-  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
-                                # microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+sig_list_summary_urban <- merge(sig_list_summary_urban, counts_df_urban, by = "microbe") %>%
+  left_join(aldex2_clr_all_sig[c("microbe", "DA_urbanism")], by="microbe")
 
 ```
 Rural only
@@ -579,9 +714,8 @@ counts_df_rural <- merged_df_rural %>%
             n_D = sum(l2fc_dir == "D")) 
 
 # Step 4: Merge the summary dataframe with generaspecies_sig_list_summary to add the n_U and n_D columns
-sig_list_summary_rural <- merge(sig_list_summary_rural, counts_df_rural, by = "microbe") #%>%
-  #mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
-                                # microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+sig_list_summary_rural <- merge(sig_list_summary_rural, counts_df_rural, by = "microbe") %>%
+  left_join(aldex2_clr_all_sig[c("microbe", "DA_urbanism")], by="microbe")
 
 ```
 
@@ -608,6 +742,7 @@ gene_list_summary_plot <- gene_list_summary %>%
 Urban only
 ```{r}
 gene_list_summary_urban <- sig_list_df_urban %>%
+  #dplyr::filter(!microbe %in% c("Alistipes_megaguti", "Alistipes_communis", "Bacteroides_faecichinchillae", "Erysipelatoclostridium", "Unknown_genus_70")) %>%
   group_by(hgnc_symbol) %>%
   summarise(
     n_microbes = n(),
@@ -627,6 +762,7 @@ gene_list_summary_plot_urban <- gene_list_summary_urban %>%
 Rural only
 ```{r}
 gene_list_summary_rural <- sig_list_df_rural %>%
+  #dplyr::filter(!microbe %in% c("Unknown_genus_54", "Holdemanella_sp_2", "Parasutterella_excrementihominis", "Parasutterella", "Erysipelatoclostridium", "Moraxellaceae", "Acinetobacter", "Acinetobacter_baumannii", "Holdemanella_biformis", "Clostridium_innocuum")) %>%
   group_by(hgnc_symbol) %>%
   summarise(
     n_microbes = n(),
@@ -646,13 +782,15 @@ gene_list_summary_plot_rural <- gene_list_summary_rural %>%
 
 ```{r}
 gene_list_summary_plot <- gene_list_summary_plot %>%
-  dplyr::arrange(n_microbes, hgnc_symbol) 
+  dplyr::arrange(n_microbes, hgnc_symbol) %>%
+  mutate(count = as.numeric(count))
 
 gene_list_summary_plot$hgnc_symbol <- factor(gene_list_summary_plot$hgnc_symbol, levels = unique(gene_list_summary_plot$hgnc_symbol))
 
 ggplot(dplyr::filter(gene_list_summary_plot, gene_list_summary_plot$l2fc_dir=="U"), aes(x = DA_urbanism, y = hgnc_symbol, color=DA_urbanism)) + 
   geom_point(aes(size = ifelse(count == 0, NA, count))) +
   scale_size_continuous(limits = c(0, 50)) +
+  labs(color = "Population in which microbe is differentially abundant") +
   labs(size = "Number of microbes") + # Optional: Label for the size legend
   scale_color_manual(values=c("#6FBD8B", "#7B2BC1")) +
   facet_grid(~l2fc_dir) +
@@ -671,6 +809,7 @@ ggplot(dplyr::filter(gene_list_summary_plot, gene_list_summary_plot$l2fc_dir=="U
 ggplot(dplyr::filter(gene_list_summary_plot, gene_list_summary_plot$l2fc_dir=="D"), aes(x = DA_urbanism, y = hgnc_symbol, color=DA_urbanism)) + 
   geom_point(aes(size = ifelse(count == 0, NA, count))) +
   scale_size_continuous(limits = c(0, 50)) +
+  labs(color = "Population in which microbe is differentially abundant") +
   labs(size = "Number of microbes") + # Optional: Label for the size legend
   scale_color_manual(values=c("#6FBD8B", "#7B2BC1")) +
   facet_grid(~l2fc_dir) +
@@ -686,7 +825,96 @@ ggplot(dplyr::filter(gene_list_summary_plot, gene_list_summary_plot$l2fc_dir=="D
         panel.spacing = unit(0.2, "cm"))
 #ggsave("results/figs/RNAseq-metaG-microbe/gene_diffabun_heatmap_D.png", width=3, height=6)
 ```
+```{r}
+gene_list_summary_plot_urban <- gene_list_summary_plot_urban %>%
+  dplyr::arrange(n_microbes, hgnc_symbol) %>%
+  mutate(count = as.numeric(count))
 
+gene_list_summary_plot_urban$hgnc_symbol <- factor(gene_list_summary_plot_urban$hgnc_symbol, levels = unique(gene_list_summary_plot_urban$hgnc_symbol))
+
+ggplot(dplyr::filter(gene_list_summary_plot_urban, gene_list_summary_plot_urban$l2fc_dir=="U"), aes(x = DA_urbanism, y = hgnc_symbol, color=DA_urbanism)) + 
+  geom_point(aes(size = ifelse(count == 0, NA, count))) +
+  scale_size_continuous(limits = c(0, 5)) +
+  labs(color = "Population in which microbe is differentially abundant") +
+  labs(size = "Number of microbes") + # Optional: Label for the size legend
+  scale_color_manual(values=c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(~l2fc_dir) +
+  theme_minimal() +
+  scale_x_discrete(labels = c("Rural", "Urban")) +
+  theme(strip.background = element_blank(),
+        #strip.text = element_blank(),
+        axis.text.y = element_text(face = "italic", hjust=0.5),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.spacing = unit(0.2, "cm"))
+#ggsave("results/figs/RNAseq-metaG-microbe/gene_diffabun_heatmap_U.png", width=3, height=6)
+
+ggplot(dplyr::filter(gene_list_summary_plot_urban, gene_list_summary_plot_urban$l2fc_dir=="D"), aes(x = DA_urbanism, y = hgnc_symbol, color=DA_urbanism)) + 
+  geom_point(aes(size = ifelse(count == 0, NA, count))) +
+  scale_size_continuous(limits = c(0, 5)) +
+  labs(color = "Population in which microbe is differentially abundant") +
+  labs(size = "Number of microbes") + # Optional: Label for the size legend
+  scale_color_manual(values=c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(~l2fc_dir) +
+  theme_minimal() +
+  scale_x_discrete(labels = c("Rural", "Urban")) +
+  theme(strip.background = element_blank(),
+        #strip.text = element_blank(),
+        axis.text.y = element_text(face = "italic", hjust=0.5),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.spacing = unit(0.2, "cm"))
+#ggsave("results/figs/RNAseq-metaG-microbe/gene_diffabun_heatmap_D.png", width=3, height=6)
+```
+```{r}
+gene_list_summary_plot_rural <- gene_list_summary_plot_rural %>%
+  dplyr::arrange(n_microbes, hgnc_symbol) %>%
+  mutate(count = as.numeric(count))
+
+gene_list_summary_plot_rural$hgnc_symbol <- factor(gene_list_summary_plot_rural$hgnc_symbol, levels = unique(gene_list_summary_plot_rural$hgnc_symbol))
+
+ggplot(dplyr::filter(gene_list_summary_plot_rural, gene_list_summary_plot_rural$l2fc_dir=="U"), aes(x = DA_urbanism, y = hgnc_symbol, color=DA_urbanism)) + 
+  geom_point(aes(size = ifelse(count == 0, NA, count))) +
+  scale_size_continuous(limits = c(0, 5)) +
+  labs(color = "Population in which microbe is differentially abundant") +
+  labs(size = "Number of microbes") + # Optional: Label for the size legend
+  scale_color_manual(values=c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(~l2fc_dir) +
+  theme_minimal() +
+  scale_x_discrete(labels = c("Rural", "Urban")) +
+  theme(strip.background = element_blank(),
+        #strip.text = element_blank(),
+        axis.text.y = element_text(face = "italic", hjust=0.5),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.spacing = unit(0.2, "cm"))
+#ggsave("results/figs/RNAseq-metaG-microbe/gene_diffabun_heatmap_U.png", width=3, height=6)
+
+ggplot(dplyr::filter(gene_list_summary_plot_rural, gene_list_summary_plot_rural$l2fc_dir=="D"), aes(x = DA_urbanism, y = hgnc_symbol, color=DA_urbanism)) + 
+  geom_point(aes(size = ifelse(count == 0, NA, count))) +
+  scale_size_continuous(limits = c(0, 5)) +
+  labs(color = "Population in which microbe is differentially abundant") +
+  labs(size = "Number of microbes") + # Optional: Label for the size legend
+  scale_color_manual(values=c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(~l2fc_dir) +
+  theme_minimal() +
+  scale_x_discrete(labels = c("Rural", "Urban")) +
+  theme(strip.background = element_blank(),
+        #strip.text = element_blank(),
+        axis.text.y = element_text(face = "italic", hjust=0.5),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.spacing = unit(0.2, "cm"))
+#ggsave("results/figs/RNAseq-metaG-microbe/gene_diffabun_heatmap_D.png", width=3, height=6)
+```
 How to derive residuals: https://support.bioconductor.org/p/60567/
 ```{r}
 # Extract the residuals (batch and total.reads corrected counts)
@@ -941,10 +1169,8 @@ shinyApp(ui, server)
 
 
 ```{r}
-melted_gssls <- sig_list_summary %>%
-  dplyr::filter(n_genes > 10) %>%
-  # I am suspicious of this microbe, removing for now
-  dplyr::filter(!microbe=="Hungatella_hathewayi") %>%
+melted_gssls_urban <- sig_list_summary_urban %>%
+  #dplyr::filter(n_genes < 50) %>%
   pivot_longer(cols = c("n_U", "n_D"),
                           names_to = "l2fc_dir",
                           values_to = "n_l2fc_dir") %>%
@@ -952,98 +1178,229 @@ melted_gssls <- sig_list_summary %>%
                            DA_urbanism == "urban" ~ "#7B2BC1")) %>%
   # First sort by number of host genes, then sort by urbanism to get colors right
   dplyr::arrange(DA_urbanism, n_genes, microbe)
-melted_gssls$microbe <- factor(melted_gssls$microbe, levels = unique(melted_gssls$microbe))
+melted_gssls_urban$microbe <- factor(melted_gssls_urban$microbe, levels = unique(melted_gssls_urban$microbe))
 
-ggplot(melted_gssls, aes(x = l2fc_dir, y = microbe)) + 
+ggplot(melted_gssls_urban, aes(x = l2fc_dir, y = microbe)) + 
  geom_point(aes(size = ifelse(n_l2fc_dir == 0, NA, n_l2fc_dir)), shape=18) +
-  scale_size_continuous(limits = c(0, 150)) +
+  scale_size_continuous(limits = c(0, 5000)) +
   labs(size = "Number of host genes") + 
   labs(x = "Direction of\nDGE in host", fill = "# significant\nDE host genes") +
   #facet_grid(DA_urbanism ~ ., scales="free", space="free") +
   theme_minimal() +
   theme(strip.background = element_blank(),
         strip.text = element_blank(),
-        axis.text.y = element_text(face = "italic", color=melted_gssls$color),
+        axis.text.y = element_text(face = "italic", color=melted_gssls_urban$color),
         axis.title.y = element_blank(),
         axis.ticks = element_blank(),
         panel.spacing = unit(0.2, "cm")) 
 
 #ggsave("results/figs/RNAseq-metaG-microbe/microbe_diffabun_heatmap.png", width=4.2, height=6)
 ```
+```{r}
+melted_gssls_rural <- sig_list_summary_rural %>%
+  #dplyr::filter(n_genes < 50) %>%
+  pivot_longer(cols = c("n_U", "n_D"),
+                          names_to = "l2fc_dir",
+                          values_to = "n_l2fc_dir") %>%
+  mutate(color = case_when(DA_urbanism == "rural" ~ "#6FBD8B", 
+                           DA_urbanism == "urban" ~ "#7B2BC1")) %>%
+  # First sort by number of host genes, then sort by urbanism to get colors right
+  dplyr::arrange(DA_urbanism, n_genes, microbe)
+melted_gssls_rural$microbe <- factor(melted_gssls_rural$microbe, levels = unique(melted_gssls_rural$microbe))
+
+ggplot(melted_gssls_rural, aes(x = l2fc_dir, y = microbe)) + 
+ geom_point(aes(size = ifelse(n_l2fc_dir == 0, NA, n_l2fc_dir)), shape=18) +
+  scale_size_continuous(limits = c(0, 5000)) +
+  labs(size = "Number of host genes") + 
+  labs(x = "Direction of\nDGE in host", fill = "# significant\nDE host genes") +
+  #facet_grid(DA_urbanism ~ ., scales="free", space="free") +
+  theme_minimal() +
+  theme(strip.background = element_blank(),
+        strip.text = element_blank(),
+        axis.text.y = element_text(face = "italic", color=melted_gssls_rural$color),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),
+        panel.spacing = unit(0.2, "cm")) 
+
+#ggsave("results/figs/RNAseq-metaG-microbe/microbe_diffabun_heatmap.png", width=4.2, height=6)
+```
+
 Large heatmap
 Filter for genes identified as unique 
 ```{r}
-x <- res_list_int
-heatmap_list <- foreach(
+x <- res_list_urban
+heatmap_list_urban <- foreach(
   i=seq_along(x),
   #.packages='DESeq2',
   .final = function(i) setNames(i, names(x))) %do% {
     tryCatch({
-      y <-  dplyr::filter(x[[i]], ensembl_gene_id %in% unique(sig_list_df_int$ensembl_gene_id)) %>%
+      y <-  dplyr::filter(x[[i]], ensembl_gene_id %in% unique(sig_list_df_urban$ensembl_gene_id)) %>%
         mutate(microbe = names(x)[i])
       #%>% annotate_ensembl()
       },
       error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
   }
 
-heatmap_list <- heatmap_list[names(heatmap_list) %in% names(sig_list_filt_int)]
+heatmap_list_urban <- heatmap_list_urban[names(heatmap_list_urban) %in% names(sig_list_filt_urban)]
 
-heatmap_list <- bind_rows(heatmap_list) %>%
+heatmap_list_urban <- bind_rows(heatmap_list_urban) %>%
   mutate(l2fc_sign = case_when(log2FoldChange > 0 ~ "up",
                                log2FoldChange < 0 ~ "down")) %>%
   mutate(l2fc_abs = abs(log2FoldChange)) %>%
   mutate(log2_l2fc_abs = log2(l2fc_abs)) %>%
   mutate(log2_l2fc = case_when(l2fc_sign == "up" ~ log2_l2fc_abs,
-                               l2fc_sign == "down" ~ log2_l2fc_abs * -1)) %>%
-  mutate(DA_urbanism = case_when(microbe %in% unlist(microbe_lists[["diffabun_g"]]["urban"]) ~ "urban",
-                                 microbe %in% unlist(microbe_lists[["diffabun_g"]]["rural"]) ~ "rural"))
+                               l2fc_sign == "down" ~ log2_l2fc_abs * -1))
 ```
 ```{r}
-heatmap_plot <- heatmap_list %>%
+x <- res_list_rural
+heatmap_list_rural <- foreach(
+  i=seq_along(x),
+  #.packages='DESeq2',
+  .final = function(i) setNames(i, names(x))) %do% {
+    tryCatch({
+      y <-  dplyr::filter(x[[i]], ensembl_gene_id %in% unique(sig_list_df_rural$ensembl_gene_id)) %>%
+        mutate(microbe = names(x)[i])
+      #%>% annotate_ensembl()
+      },
+      error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+heatmap_list_rural <- heatmap_list_rural[names(heatmap_list_rural) %in% names(sig_list_filt_rural)]
+
+heatmap_list_rural <- bind_rows(heatmap_list_rural) %>%
+  mutate(l2fc_sign = case_when(log2FoldChange > 0 ~ "up",
+                               log2FoldChange < 0 ~ "down")) %>%
+  mutate(l2fc_abs = abs(log2FoldChange)) %>%
+  mutate(log2_l2fc_abs = log2(l2fc_abs)) %>%
+  mutate(log2_l2fc = case_when(l2fc_sign == "up" ~ log2_l2fc_abs,
+                               l2fc_sign == "down" ~ log2_l2fc_abs * -1)) 
+```
+
+```{r}
+heatmap_plot_urban <- heatmap_list_urban %>%
   dplyr::select(ensembl_gene_id, microbe, log2FoldChange) %>%
   pivot_wider(names_from = microbe, values_from = log2FoldChange) %>%
   column_to_rownames("ensembl_gene_id") %>%
   as.matrix()
 
-col_colors <- ifelse(colnames(heatmap_plot) %in% unlist(microbe_lists[["diffabun_g"]]["rural"]), "#6FBD8B", "#7B2BC1")
+col_colors_urban <- ifelse(
+  colnames(heatmap_plot_urban) %in% 
+    aldex2_clr_all_sig$microbe[aldex2_clr_all_sig$DA_urbanism == "rural"],
+  "#6FBD8B",
+  "#7B2BC1"
+)
+
 
 # Update the heatmap function with cluster information
-heatmap(heatmap_plot,
-        ColSideColors = col_colors,
+heatmap(heatmap_plot_urban,
+        ColSideColors = col_colors_urban,
         col = rainbow(100))
 
 legend(x="bottomright", legend=c("min", "ave", "max"), 
      fill=rainbow(3))
 ```
 ```{r}
+library(ggfortify)
+
+heatmap_plot_urban_data <- heatmap_plot_urban %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("microbe") %>%
+  left_join(aldex2_clr_all_sig[,c("microbe", "DA_urbanism", "effect")], by="microbe") %>%
+  column_to_rownames("microbe")
+
+pca_res_urban <- prcomp(t(heatmap_plot_urban), scale. = TRUE)
+
+autoplot(pca_res_urban, data = heatmap_plot_urban_data, colour = 'DA_urbanism')
+autoplot(pca_res_urban, data = heatmap_plot_urban_data, colour = 'effect')
+```
+
+```{r}
+heatmap_plot_rural <- heatmap_list_rural %>%
+  dplyr::select(ensembl_gene_id, microbe, log2FoldChange) %>%
+  pivot_wider(names_from = microbe, values_from = log2FoldChange) %>%
+  column_to_rownames("ensembl_gene_id") %>%
+  as.matrix()
+
+col_colors_rural <- ifelse(
+  colnames(heatmap_plot_rural) %in% 
+    aldex2_clr_all_sig$microbe[aldex2_clr_all_sig$DA_urbanism == "rural"],
+  "#6FBD8B",
+  "#7B2BC1"
+)
+
+
+# Update the heatmap function with cluster information
+heatmap(heatmap_plot_rural,
+        ColSideColors = col_colors_rural,
+        col = rainbow(100))
+
+legend(x="bottomright", legend=c("min", "ave", "max"), 
+     fill=rainbow(3))
+```
+```{r}
+heatmap_plot_rural_data <- heatmap_plot_rural %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("microbe") %>%
+  left_join(aldex2_clr_all_sig[,c("microbe", "DA_urbanism", "effect")], by="microbe") %>%
+  column_to_rownames("microbe")
+
+pca_res_rural <- prcomp(t(heatmap_plot_rural), scale. = TRUE)
+
+autoplot(pca_res_rural, data = heatmap_plot_rural_data, colour = 'DA_urbanism')
+autoplot(pca_res_rural, data = heatmap_plot_rural_data, colour = 'effect')
+```
+
+
+```{r}
 library(ComplexHeatmap)
 library(colorRamp2)
 
 set.seed(123)
-hm_2 <- ComplexHeatmap::Heatmap(heatmap_plot, row_km = 2)
-hm_3 <- ComplexHeatmap::Heatmap(heatmap_plot, row_km = 3)
+hm_2_urban <- ComplexHeatmap::Heatmap(heatmap_plot_urban, row_km = 2)
 
-colname_hm_2 = unlist(hm_2@column_names_param["labels"])
-colname_hm_3 = unlist(hm_3@column_names_param["labels"])
+colname_hm_2_urban = unlist(hm_2_urban@column_names_param["labels"])
 
-colcolor_hm_2 <- ifelse(colname_hm_2 %in% unlist(microbe_lists[["diffabun_g"]]["rural"]), "Rural", "Urban")
-colcolor_hm_3 <- ifelse(colname_hm_3 %in% unlist(microbe_lists[["diffabun_g"]]["rural"]), "Rural", "Urban")
+colcolor_hm_2_urban <- ifelse(colname_hm_2_urban %in% 
+    aldex2_clr_all_sig$microbe[aldex2_clr_all_sig$DA_urbanism == "rural"],
+  "Rural",
+  "Urban"
+)
 
-anno_hm_2 <- HeatmapAnnotation(Urbanism = colcolor_hm_2, 
-                               col = list(colcolor_hm_2 = c("Rural" = "#6FBD8B", "Urban" = "#7B2BC1")))
-anno_hm_3 <- HeatmapAnnotation(Urbanism = colcolor_hm_3, 
-                               col = list(colcolor_hm_3 = c("Rural" = "#6FBD8B", "Urban" = "#7B2BC1")))
+anno_hm_2_urban <- HeatmapAnnotation(Urbanism = colcolor_hm_2_urban, 
+                               col = list(colcolor_hm_2_urban = c("Rural" = "#6FBD8B", "Urban" = "#7B2BC1")))
 
-hm_2@row_names_param["show"] <- FALSE
-hm_2@column_names_param["show"] <- FALSE
-hm_2@top_annotation <- anno_hm_2
-hm_2
-
-hm_3@row_names_param["show"] <- FALSE
-hm_3@column_names_param["show"] <- FALSE
-hm_3@top_annotation <- anno_hm_3
-hm_3
+hm_2_urban@row_names_param["show"] <- FALSE
+hm_2_urban@column_names_param["show"] <- FALSE
+hm_2_urban@top_annotation <- anno_hm_2_urban
+hm_2_urban
 ```
+```{r}
+set.seed(123)
+hm_2_rural <- ComplexHeatmap::Heatmap(heatmap_plot_rural, row_km = 2)
+
+colname_hm_2_rural = unlist(hm_2_rural@column_names_param["labels"])
+
+colcolor_hm_2_rural <- ifelse(colname_hm_2_rural %in% 
+    aldex2_clr_all_sig$microbe[aldex2_clr_all_sig$DA_urbanism == "rural"],
+  "Rural",
+  "Urban"
+)
+
+anno_hm_2_rural <- HeatmapAnnotation(Urbanism = colcolor_hm_2_rural, 
+                               col = list(colcolor_hm_2_rural = c("Rural" = "#6FBD8B", "Urban" = "#7B2BC1")))
+
+setwd("/Users/sabri/Documents/GitHub/gmbc-colonocytes")
+
+hm_2_rural@row_names_param["show"] <- FALSE
+hm_2_rural@column_names_param["show"] <- FALSE
+hm_2_rural@top_annotation <- anno_hm_2_urban
+hm_2_rural
+```
+
+
+
 Functional analysis: select all genes
 ```{r}
 library(clipr)

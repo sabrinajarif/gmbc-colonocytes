@@ -9,13 +9,37 @@ library(tidyverse)
 library(ggplot2)
 library(reshape2)
 ```
+POSSIBLE OUTLIERS
+
+GMCC4S10
+GMCC3S7
+GMCC4C6
+GMCC5C5
+GMCC5C4
+GMCC5C3
+
+9794IK
+6238BB
+control_b4_c6
+control_b5_c5
+control_b5_c4
+control_b5_c3
+
 Load metadata
 ```{r}
 meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
   # Batch as character
   mutate(Batch = as.character(Batch)) %>%
-  dplyr::filter(!SampleID==c("GMCC1S1", "GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
-  dplyr::filter(!SampleName=="4342XH") %>%
+  # This sample was bad quality 
+  dplyr::filter(!SampleID %in% c("GMCC1S1")) %>%
+  # These samples were outliers amongst the RNAseq
+  dplyr::filter(!SampleID %in% c("GMCC4S10", "GMCC3S7", "GMCC4C6", "GMCC5C5", "GMCC5C4", "GMCC5C3")) %>%
+  # These samples were not used to treat the colonocytes
+  dplyr::filter(!SampleName %in% c("1127XT", "1462QI", "3364PX", "3553XK", "3606IJ", "9423WC")) %>%
+  # NOT SURE WHY THESE WERE REMOVED
+  #dplyr::filter(!SampleID %in% c("GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
+  # NOT SURE WHY THIS WAS REMOVED
+  #dplyr::filter(!SampleName=="4342XH") %>%
   mutate(coculture = ifelse(grepl("control", SampleName), "control", "microbiome")) %>%
   # Replace 0s in urbanism with control
   mutate(urbanism = replace(urbanism, is.na(urbanism), "control")) %>%
@@ -29,7 +53,7 @@ meta <- meta[order(row.names(meta)), ]
 ```
 Import raw read counts
 ```{r}
-raw_read_cts_filt <- read.csv("results/docs/raw_read_cts_filt.csv", row.names=1) 
+raw_read_cts_filt <- read.csv("results/docs/raw_read_cts_filt.csv", row.names=1)
 raw_read_cts_filt <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% meta$SampleID]
 raw_read_cts_filt <- raw_read_cts_filt[, order(colnames(raw_read_cts_filt))]
 ```
@@ -41,9 +65,41 @@ dds <- DESeq(
       colData = meta,
       design= ~Batch + urbanism))
 ```
+```{r}
+dds2 <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt,
+      colData = meta,
+      design= ~Batch + coculture))
+```
+
+```{r}
+vsd <- vst(dds2)
+plotPCA(vsd, "Batch")
+plotPCA(vsd, "coculture")
+plotPCA(vsd, "urbanism")
+assay(vsd) <- limma::removeBatchEffect(assay(vsd), vsd$Batch)
+plotPCA(vsd, "Batch")
+plotPCA(vsd, "coculture")
+plotPCA(vsd, "urbanism")
+```
+```{r}
+pcaData <- plotPCA(vsd, intgroup=c("coculture", "urbanism", "Batch", "SampleName"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=Batch, label=name)) +
+  geom_text(size=2) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed()
+```
+
 
 Results
 ```{r}
+res_coculture <- results(dds2, contrast = c("coculture", "microbiome", "control")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ensembl_gene_id")
+  
 res_uc <- results(dds, contrast = c("urbanism", "urban", "control")) %>%
   as.data.frame() %>%
   rownames_to_column("ensembl_gene_id")
@@ -58,14 +114,21 @@ res_ur <- results(dds, contrast = c("urbanism", "urban", "rural")) %>%
 ```
 Filter for significance
 ```{r}
+sig_coculture <- res_coculture %>%
+  dplyr::filter(padj<0.1) %>%
+  #dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
+  mutate(model="sig_coculture")
+  
 sig_uc <- res_uc %>%
   dplyr::filter(padj<0.1) %>%
-  dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
+  #dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
   mutate(model="sig_uc")
+
 sig_rc <- res_rc %>%
   dplyr::filter(padj<0.1) %>%
-  dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
+  #dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
   mutate(model="sig_rc")
+
 sig_ur <- res_ur %>%
   dplyr::filter(padj<0.1)
 ```
@@ -205,7 +268,7 @@ ggplot(res_uc_rc_lab2, aes(x=log2FoldChange, y=ensembl_gene_id, fill=contrast, c
         axis.title.y = element_blank(),
         axis.text.y = element_blank()) +
   geom_vline(xintercept=0, color="grey")
-ggsave("results/figs/RNAseq-urbanism/gene_l2fC_dotplot.png", width=3, height=7)
+#ggsave("results/figs/RNAseq-urbanism/gene_l2fC_dotplot.png", width=3, height=7)
 ```
 ```{r}
 library(lattice)
@@ -453,7 +516,7 @@ First annotate data with gene labels compatible with enrichment analyses. I like
 ```{r}
 library(ensembldb)
 library(biomaRt)
-ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", host="jul2023.archive.ensembl.org")
 
 # Define annotations
 att_interest <- c("ensembl_gene_id", "description", "hgnc_symbol") #"ensembl_transcript_id", 
@@ -586,7 +649,7 @@ ggplot(enriched_pathways, aes(x=model, y=ID, color=model, size=neglog10_p.adjust
   scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
   facet_grid(db ~ ., scales="free", space="free") +
   theme_linedraw()
-ggsave("results/figs/RNAseq-urbanism/enriched_pathways.png", width=11, height=6.5)
+#ggsave("results/figs/RNAseq-urbanism/enriched_pathways.png", width=11, height=6.5)
 ```
 Now plotting just the results of the "shared" model
 ```{r}
@@ -608,7 +671,7 @@ ggplot(enriched_pathways_sharedgenesonly, aes(x=value, y=ID, size=neglog10_p.adj
   #scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
   facet_grid(db ~ ., scales="free", space="free") +
   theme_linedraw()
-ggsave("results/figs/RNAseq-urbanism/enriched_pathways_sharedgenesonly.png", width=8, height=2)
+#ggsave("results/figs/RNAseq-urbanism/enriched_pathways_sharedgenesonly.png", width=8, height=2)
 ```
 
 

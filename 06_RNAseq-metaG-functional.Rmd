@@ -20,24 +20,6 @@ library(ALDEx2)
 --------------------------------------------------------------------------------
 SETUP
 --------------------------------------------------------------------------------
-
-Load gene family data (in kegg IDs) and tidy up
-```{r}
-#gene_families <- read.csv("data/metaG-functional/genefam_combined.tsv", header =T, sep = "\t")
-#gene_families2 <- gene_families %>%
-  # remove X from colnames
-#  rename_all(~gsub("^X", "", .)) %>%
-  # remove "_Abundance.RPKs" string from colnames
-#  rename_all(~str_remove(.x, "_Abundance.RPKs")) %>%
-  # rename first column
-#  rename_at(1, ~"GeneFamily")
-
-#gene_families_filt1 <- gene_families2 %>%
-  # for now, filter at the gene level, don't include microbe contributions
-#  filter(!grepl("\\|", GeneFamily))
-```
-This is a lot of data...lets start at the pathway level instead.
-
 Load abundances of pathways
 ```{r}
 pathway_abundances <- read.csv("data/metaG-functional/pathabun_combined.tsv", header =T, sep = "\t")
@@ -69,8 +51,14 @@ remove_from_meta <- setdiff(meta$SampleName, colnames(pathway_abundances2))
 meta <- meta %>%
   # exclude controls
   dplyr::filter(!Luca_Lab_ID=="control") %>%
-  dplyr::filter(!SampleID==c("GMCC1S1", "GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
-  dplyr::filter(!SampleName=="4342XH") %>%
+  # This sample was bad quality 
+  dplyr::filter(!SampleID %in% c("GMCC1S1")) %>%
+  # These samples were outliers amongst the RNAseq
+  dplyr::filter(!SampleID %in% c("GMCC4S10", "GMCC3S7", "GMCC4C6", "GMCC5C5", "GMCC5C4", "GMCC5C3")) %>%
+  # These samples were not used to treat the colonocytes
+  dplyr::filter(!SampleName %in% c("1127XT", "1462QI", "3364PX", "3553XK", "3606IJ", "9423WC")) %>%
+  # These samples did not have metagenomic sequencing data
+  dplyr::filter(!SampleID %in% c("GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
   # exclude samples absent in pathway data
   dplyr::filter(!SampleName %in% remove_from_meta) %>%
   mutate(Batch = as.character(Batch)) %>%
@@ -417,7 +405,7 @@ saveRDS(meta_rural, "data/for_hpc/meta_rural.rds")
 ```
 rsync every .rds file in the for_hpc folder (can run directly from here)
 ```{bash}
-scp -r data/for_hpc/*.rds sjarif@midway3-login4.rcc.uchicago.edu:/project/blekhman/sjarif/GMbC/DESeq
+scp -r data/for_hpc/*.rds sjarif@midway3-login4.rcc.uchicago.edu:/project/blekhman/sjarif/GMbC/DESeq/input_rds_files
 ```
 Now create R script and save. Alter based on model of interest.
 ```{R}
@@ -1043,3 +1031,6 @@ residuals_melt_rural <- residuals_rbind_rural  %>%
   left_join(DA_microbe_abundances2_melt[c("SampleName_microbe", "microbe_abundance_CLR")], by="SampleName_microbe") %>%
   dplyr::select(c("microbe_gene", "microbe_abundance_CLR", "residual_gene_count"))
 ```
+
+
+

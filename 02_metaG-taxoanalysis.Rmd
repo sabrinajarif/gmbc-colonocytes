@@ -235,6 +235,8 @@ aldex2_sig <- function(aldex2_res, tax_level_quotes){
   aldex2_res %>%
     dplyr::filter(wi.eBH < 0.01) %>%
     arrange(effect, wi.eBH) %>%
+    mutate(DA_urbanism = case_when(effect > 0 ~ "urban",
+                                   effect < 0 ~ "rural")) %>%
     mutate(tax = tax_level_quotes) %>% 
     dplyr::select(tax, everything())
   }
@@ -317,6 +319,8 @@ aldex2_clr_all_sig <- rbind(aldex2_clr_s_sig, aldex2_clr_g_sig) %>%
   rbind(aldex2_clr_o_sig) %>%
   rbind(aldex2_clr_c_sig) %>%
   rbind(aldex2_clr_p_sig)
+
+write.csv(aldex2_clr_all_sig, "results/docs/DA_microbe_aldex2.csv")
 
 # plot
 aldex2_plot(aldex2_clr_s_res)
@@ -436,6 +440,11 @@ filter_perc <- function(summ, perc) {
   unique(x$OTU)
 }
 
+keep1 <- c(summ_s, summ_g, summ_f, summ_o, summ_c, summ_p)
+length(keep1$OTU)
+
+nrow(aldex2_clr_all_sig)
+
 keep_s <- filter_perc(summ_s, 0.1)
 keep_g <- filter_perc(summ_g, 0.1)
 keep_f <- filter_perc(summ_f, 0.5)
@@ -443,11 +452,11 @@ keep_o <- filter_perc(summ_o, 0.5)
 keep_c <- filter_perc(summ_c, 1)
 keep_p <- filter_perc(summ_p, 1)
 
-keep1 <- c(keep_s, keep_g, keep_f, keep_o, keep_c, keep_p)
-length(keep1)
-
-keep2 <- keep1[keep1 %in% row.names(aldex2_clr_all_sig)]
+keep2 <- c(keep_s, keep_g, keep_f, keep_o, keep_c, keep_p)
 length(keep2)
+
+keep3 <- keep2[keep2 %in% row.names(aldex2_clr_all_sig)]
+length(keep3)
 ```
 
 
@@ -464,7 +473,21 @@ DA_microbe_abundances <- rbind(aldex2_clr_s_cts, aldex2_clr_g_cts) %>%
   data.frame %>%
   dplyr::select(keep2) 
 
-write.csv(DA_microbe_abundances, "results/docs/DA_microbe_abundances.csv")
+relativeabun_func <- function(phy) {
+  output <- otu_table(phy) %>% as.data.frame()
+}
+
+DA_microbe_abundances_relativeabun <- rbind(relativeabun_func(phy_r_filt_s), relativeabun_func(phy_r_filt_g)) %>%
+  rbind(relativeabun_func(phy_r_filt_f)) %>%
+  rbind(relativeabun_func(phy_r_filt_o)) %>%
+  rbind(relativeabun_func(phy_r_filt_c)) %>%
+  rbind(relativeabun_func(phy_r_filt_p)) %>%
+  t() %>%
+  data.frame %>%
+  dplyr::select(keep2)
+
+#write.csv(DA_microbe_abundances, "results/docs/DA_microbe_abundances.csv")
+write.csv(DA_microbe_abundances_relativeabun, "results/docs/DA_microbe_abundances_relativeabun.csv")
 
 
 #genusspecies_clr_abundance <- cbind(t(as.data.frame(otu_table(phy_clr_filt_g))), t(as.data.frame(otu_table(phy_clr_filt))))
@@ -506,7 +529,7 @@ DA_microbe_abundances_phyclr <- rbind(phy_clr_s_cts, phy_clr_g_cts) %>%
   rbind(phy_clr_p_cts) %>%
   t() %>%
   data.frame %>%
-  dplyr::select(keep2) 
+  dplyr::select(row.names(aldex2_clr_all_sig)) 
 
 write.csv(DA_microbe_abundances_phyclr, "results/docs/DA_microbe_abundances_phyclr.csv")
 ```
