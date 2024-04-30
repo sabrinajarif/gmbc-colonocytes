@@ -49,6 +49,7 @@ meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
   mutate(urbanism2 = replace(urbanism2, is.na(urbanism2), "control")) %>%
   mutate(rnames=SampleID) %>%
   column_to_rownames("rnames")
+
 meta <- meta[order(row.names(meta)), ]
 ```
 Import raw read counts
@@ -124,10 +125,16 @@ sig_uc <- res_uc %>%
   #dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
   mutate(model="sig_uc")
 
+sig_uc_up <- sig_uc %>% dplyr::filter(log2FoldChange>0)
+sig_uc_down <- sig_uc %>% dplyr::filter(log2FoldChange<0)
+
 sig_rc <- res_rc %>%
   dplyr::filter(padj<0.1) %>%
   #dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
   mutate(model="sig_rc")
+
+sig_rc_up <- sig_rc %>% dplyr::filter(log2FoldChange>0)
+sig_rc_down <- sig_rc %>% dplyr::filter(log2FoldChange<0)
 
 sig_ur <- res_ur %>%
   dplyr::filter(padj<0.1)
@@ -224,7 +231,7 @@ ggplot(res_uc_rc, aes(x=abs_l2fc_uc, y=abs_l2fc_rc, color=color_group, fill=sig,
 ```{r}
 most_sig <- rbind(res_uc, res_rc) %>%
   arrange(padj) %>%
-  slice_head(n = 100) %>%
+  slice_head(n = 50) %>% #100
   distinct(ensembl_gene_id) %>%
   pull()
   
@@ -269,6 +276,7 @@ ggplot(res_uc_rc_lab2, aes(x=log2FoldChange, y=ensembl_gene_id, fill=contrast, c
         axis.text.y = element_blank()) +
   geom_vline(xintercept=0, color="grey")
 #ggsave("results/figs/RNAseq-urbanism/gene_l2fC_dotplot.png", width=3, height=7)
+#ggsave("results/figs/RNAseq-urbanism/gene_l2fC_dotplot.png", width=3, height=4)
 ```
 ```{r}
 library(lattice)
@@ -555,8 +563,8 @@ uc_top <- sig_uc %>%
   #dplyr::filter(!ensembl_gene_id %in% sig_shared) %>%
   mutate(abs_l2fc = abs(log2FoldChange)) %>%
   arrange(desc(abs_l2fc), padj) %>%
-  annotate_ensembl() #%>%
-  #slice(1:250)
+  annotate_ensembl() %>%
+  dplyr::slice(1:400)
 #length(unique(uc_top$hgnc_symbol))
 
 # another dataframe of sig genes 
@@ -564,34 +572,61 @@ rc_top <- sig_rc %>%
   #dplyr::filter(!ensembl_gene_id %in% sig_shared) %>%
   mutate(abs_l2fc = abs(log2FoldChange)) %>%
   arrange(desc(abs_l2fc), padj) %>%
-  annotate_ensembl() #%>%
-  #slice(1:250)
+  annotate_ensembl() %>%
+  dplyr::slice(1:400)
 #length(unique(rc_top$hgnc_symbol))
 ```
 https://cran.r-project.org/web/packages/msigdbr/vignettes/msigdbr-intro.html
 https://www.gsea-msigdb.org/gsea/msigdb/human/genesets.jsp?collection=CP
+About these databases: https://www.gsea-msigdb.org/gsea/msigdb/human/collections.jsp
 
 Next choose the databases you want to test. KEGG and Reactome are the most relevant for my research.
 Per Sambhawa's 2022 pub, I am only investigating a pathway if it contains at least 25 genes but less than 300 genes. 
 ```{r}
 library(msigdbr)
 
+#msigdbr_collections()
+
 # download databases of interest
+msigdb_h = msigdbr(species = "human", category = "H")
 msigdb_cpPID = msigdbr(species = "human", category = "C2", subcategory = "CP:PID")
 msigdb_cpKEGG = msigdbr(species = "human", category = "C2", subcategory = "CP:KEGG")
 msigdb_cpREACTOME = msigdbr(species = "human", category = "C2", subcategory = "CP:REACTOME")
 msigdb_cpBIOCARTA = msigdbr(species = "human", category = "C2", subcategory = "CP:BIOCARTA")
+msigdb_cgp = msigdbr(species = "human", category = "C2", subcategory = "CGP") %>%
+  mutate(gs_name = paste("CGP", gs_name, sep = "_"))
+msigdb_cgn = msigdbr(species = "human", category = "C4", subcategory = "CGN") %>%
+  mutate(gs_name = paste("CGN", gs_name, sep = "_"))
+msigdb_cm = msigdbr(species = "human", category = "C4", subcategory = "CM") %>%
+  mutate(gs_name = paste("CM", gs_name, sep = "_"))
+msigdb_IMMUNESIGDB = msigdbr(species = "human", category = "C7", subcategory = "IMMUNESIGDB") %>%
+  mutate(gs_name = paste("IMMUNESIGDB", gs_name, sep = "_"))
 
 # Experimenting with pasting these all together to reduce code burden
 msigdb_cp <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>%
-  rbind(msigdb_cpPID) 
+  rbind(msigdb_cpPID)
 
+msigdb_all <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>%
+  rbind(msigdb_cpPID) #%>%
+  #rbind(msigdb_cpBIOCARTA) %>%
+  #rbind(msigdb_h) %>%
+  #rbind(msigdb_cgp) %>%
+  #rbind(msigdb_cgn) #%>%
+  #rbind(msigdb_cm) # %>%
+  #rbind(msigdb_IMMUNESIGDB)
+  
 # Summarize metrics from all pathways from all databases
 msigdb_cp_summary <- msigdb_cp %>%
   group_by(gs_name) %>%
   summarize(GeneCount = n_distinct(gene_symbol)) %>%
   # sambhawas filtering cutoffs
-  dplyr::filter(GeneCount >25, GeneCount < 300)
+  dplyr::filter(GeneCount > 25, GeneCount < 300)
+
+msigdb_all_summary <- msigdb_all %>%
+  group_by(gs_name) %>%
+  summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  # sambhawas filtering cutoffs
+  dplyr::filter(GeneCount > 25, GeneCount < 300)
 
 # Narrow down pathways that meet our thresholds  
 msigdb_cp_filt <- msigdb_cp %>%
@@ -604,6 +639,9 @@ msigdb_cpREACTOME_filt <- msigdb_cpREACTOME %>%
   dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
 msigdb_cpBIOCARTA_filt <- msigdb_cpBIOCARTA %>%
   dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+
+msigdb_all_filt <- msigdb_all %>%
+  dplyr::filter(gs_name %in% msigdb_all_summary$gs_name)
 ```
 clusterProfiler for enrichment analysis. Once again I am trying 3 different GSEAs: "shared", "uc" and "rc"
 ```{r}
@@ -612,44 +650,74 @@ library(clusterProfiler)
 # df of distinct gene symbols
 # TERM2GENE is a data frame with first column of term ID and second column of corresponding mapped gene
 msigdb_cp_t2g = msigdb_cp_filt %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+msigdb_all_t2g = msigdb_all_filt %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
 
 # Enrichment analysis step
 # input to gene can be a df column or a list, same with universe
-shared_enrich <- enricher(gene = unique(sig_top$hgnc_symbol), TERM2GENE = msigdb_cp_t2g, universe = uni$hgnc_symbol)
+shared_enrich <- enricher(gene = unique(sig_top$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni$hgnc_symbol)
 shared_enrich_res <- shared_enrich@result %>%
   # I am only interested in a gene set if at least 3 of my sig genes belong, and if the FDR is < 0.1
   dplyr::filter(Count > 3, p.adjust < 0.1)
 
-uc_enrich <- enricher(gene = unique(uc_top$hgnc_symbol), TERM2GENE = msigdb_cp_t2g, universe = uni$hgnc_symbol)
-uc_enrich_res <- uc_enrich@result %>%
-  dplyr::filter(Count > 3, p.adjust < 0.1) %>%
-  mutate(model="uc")
+uc_enrich <- enricher(gene = unique(uc_top$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni$hgnc_symbol)
+uc_enrich_res <- uc_enrich@result %>% mutate(model="uc")
+uc_enrich_sig <- uc_enrich_res %>% dplyr::filter(Count > 3, p.adjust < 0.1) 
 
-rc_enrich <- enricher(gene = unique(rc_top$hgnc_symbol), TERM2GENE = msigdb_cp_t2g, universe = uni$hgnc_symbol)
-rc_enrich_res <- rc_enrich@result %>%
-  dplyr::filter(Count > 3, p.adjust < 0.1) %>%
-  mutate(model="rc")
+
+rc_enrich <- enricher(gene = unique(rc_top$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni$hgnc_symbol)
+rc_enrich_res <- rc_enrich@result  %>% mutate(model="rc")
+rc_enrich_sig <- rc_enrich_res %>% dplyr::filter(Count > 3, p.adjust < 0.1) 
 ```
 Plot the results. Here I combined the results from my different enrichment tests "uc" and "rc"
 ```{r}
 enriched_pathways <- rbind(uc_enrich_res, rc_enrich_res) %>%
+  dplyr::filter(ID %in% c(uc_enrich_sig$ID, rc_enrich_sig$ID)) %>%
   mutate(db = case_when(
+    grepl("HALLMARK", ID) ~ "Hallmark",
     grepl("REACTOME", ID) ~ "Reactome",
     grepl("KEGG", ID) ~ "KEGG",
     grepl("PID", ID) ~ "PID",
+    grepl("BIOCARTA", ID) ~ "Biocarta",
+    grepl("CGP", ID) ~ "CGP",
+    grepl("CGN", ID) ~ "CGN",
+    grepl("CM", ID) ~ "CM",
+    grepl("IMMUNESIGDB", ID) ~ "IMMUNESIGDB",
     TRUE ~ "Other"  # Add a default value for other cases
   )) %>%
+  mutate(ID_2 = gsub("^[^_]+_", "", ID)) %>%
+  mutate(ID_2 = gsub("_", " ", ID_2)) %>%
+  #mutate(ID_2 = paste0(toupper(substring(ID_2, 1, 1)), tolower(substring(ID_2, 2)))) %>%
+  mutate(sig = case_when(
+    model=="uc" & ID %in% uc_enrich_sig$ID ~ "sig_uc",
+    model=="rc" & ID %in% rc_enrich_sig$ID ~ "sig_rc",
+    model=="uc" & !ID %in% uc_enrich_sig$ID ~ "ns_uc",
+    model=="rc" & !ID %in% rc_enrich_sig$ID ~ "ns_rc",
+  )) %>%
+  dplyr::filter(!sig=="ns_uc", !sig=="ns_rc") %>%
+  mutate(sig_in = case_when(
+    ID %in% uc_enrich_sig$ID & ID %in% rc_enrich_sig$ID ~ "both",
+    ID %in% uc_enrich_sig$ID & !ID %in% rc_enrich_sig$ID ~ "urban_only",
+    ID %in% rc_enrich_sig$ID & !ID %in% uc_enrich_sig$ID ~ "rural_only",
+    TRUE ~ "Other"
+  )) %>%
   mutate(neglog10_p.adjust = -log10(p.adjust)) %>%
-  mutate(as.numeric(neglog10_p.adjust)) %>%
-  arrange(neglog10_p.adjust)
-enriched_pathways$ID <- factor(enriched_pathways$ID, levels=unique(enriched_pathways$ID))
+  mutate(neglog10_p.adjust = as.numeric(neglog10_p.adjust)) %>%
+  mutate(GeneRatio_numeric = sapply(strsplit(as.character(GeneRatio), "/"), function(x) as.numeric(x[1])/as.numeric(x[2]))) %>%
+  arrange(GeneRatio_numeric)
+  #arrange(neglog10_p.adjust)
+enriched_pathways$ID_2 <- factor(enriched_pathways$ID_2, levels=unique(enriched_pathways$ID_2))
 
-ggplot(enriched_pathways, aes(x=model, y=ID, color=model, size=neglog10_p.adjust)) +
+ggplot(enriched_pathways, aes(x=GeneRatio_numeric, y=ID_2, fill=model, color=model, size=neglog10_p.adjust)) + #, size=neglog10_p.adjust # shape=sig
   geom_point() +
+  scale_size_continuous() +
   scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
-  facet_grid(db ~ ., scales="free", space="free") +
+  scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  #scale_shape_manual(values = c(3,3,21,21)) +
+  facet_grid(sig_in ~ ., scales="free", space="free") +
   theme_linedraw()
 #ggsave("results/figs/RNAseq-urbanism/enriched_pathways.png", width=11, height=6.5)
+#ggsave("results/figs/RNAseq-urbanism/enriched_pathways.png", width=5, height=3)
+ggsave("results/figs/RNAseq-urbanism/enriched_pathways.png", width=6, height=3)
 ```
 Now plotting just the results of the "shared" model
 ```{r}
@@ -674,6 +742,23 @@ ggplot(enriched_pathways_sharedgenesonly, aes(x=value, y=ID, size=neglog10_p.adj
 #ggsave("results/figs/RNAseq-urbanism/enriched_pathways_sharedgenesonly.png", width=8, height=2)
 ```
 
+
+GSEA analysis
+```{r}
+uc_gene_list = uc_top$abs_l2fc 
+names(uc_gene_list) = uc_top$hgnc_symbol
+uc_gene_list = sort(uc_gene_list, decreasing = TRUE) 
+uc_gene_list = uc_gene_list[!duplicated(names(uc_gene_list))] 
+
+rc_gene_list = rc_top$abs_l2fc 
+names(rc_gene_list) = rc_top$hgnc_symbol
+rc_gene_list = sort(rc_gene_list, decreasing = TRUE) 
+rc_gene_list = rc_gene_list[!duplicated(names(rc_gene_list))] 
+
+
+uc_gsea_res = GSEA(gene = uc_gene_list, TERM2GENE = msigdb_cp_t2g, pvalueCutoff = 0.1)
+rc_gsea_res = GSEA(gene = rc_gene_list, TERM2GENE = msigdb_cp_t2g, pvalueCutoff = 0.1)
+```
 
 
 ```{r}

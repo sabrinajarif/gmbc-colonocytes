@@ -262,6 +262,7 @@ Now prepare for DESeq analysis
 pathway_abundances_filt2_r_t <- t(pathway_abundances_filt2_r) %>%
   as.data.frame() %>%
   rownames_to_column("SampleName")
+write.csv(pathway_abundances_filt2_r_t, "results/docs/pathway_abundances_filt2_r_t.csv")
 
 # Attach to metadata
 meta <- meta %>%

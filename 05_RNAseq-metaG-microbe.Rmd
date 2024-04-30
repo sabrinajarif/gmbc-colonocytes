@@ -24,8 +24,7 @@ SETUP
 Load CLR-transformed abundances of microbes of interest
 ```{r}
 # Read in CLR abundances of microbes
-#DA_microbe_abundances <- read.csv("results/docs/DA_microbe_abundances_phyclr.csv", row.names = 1)
-DA_microbe_abundances <- read.csv("results/docs/DA_microbe_abundances_relativeabun.csv", row.names = 1)
+DA_microbe_abundances <- read.csv("results/docs/clr_filt_DA_microbe_abundances.csv", row.names = 1)
 DA_microbe_abundances2 <- DA_microbe_abundances %>% rownames_to_column("SampleName")
 
 # ALDEx2 data
@@ -77,7 +76,7 @@ ggplot(aldex2_clr_all_sig, aes(x=DA_urbanism)) +
   geom_bar(stat = "count") +
   xlab("Population in which microbe is differentially abundant") +
   ylab("Number of microbes") +
-  ggtitle("Differentially abundant microbes (n=178)")
+  ggtitle("Differentially abundant microbes (n=109)")
 ```
 Effect sizes
 ```{r}
@@ -86,7 +85,7 @@ ggplot(aldex2_clr_all_sig, aes(x=DA_urbanism, y=abs(effect))) +
   geom_jitter() +
   xlab("Population in which microbe is differentially abundant") +
   ylab("Effect size") +
-  ggtitle("Differentially abundant microbes (n=178)")
+  ggtitle("Differentially abundant microbes (n=109)")
 ```
 Phylogenetic level
 ```{r}
@@ -97,7 +96,7 @@ ggplot(aldex2_clr_all_sig, aes(x=DA_urbanism, fill=tax)) +
   labs(fill = "Phylogenetic level") +
   xlab("Population in which microbe is differentially abundant") +
   ylab("Number of microbes") +
-  ggtitle("Differentially abundant microbes (n=178)")
+  ggtitle("Differentially abundant microbes (n=109)")
 ```
 
 Load raw read counts
@@ -1020,6 +1019,7 @@ residuals_melt_urban <- residuals_rbind_urban  %>%
     names_to = "SampleID",
     values_to = "residual_gene_count"
   ) %>%
+  dplyr::filter(!microbe %in% c("Erysipelotrichaceae", "Erysipelotrichales", "Erysipelotrichia", "Unknown_genus_82")) %>%
   left_join(meta_urban[c("SampleName", "SampleID")], by = "SampleID") %>%
   mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) %>%
   left_join(DA_microbe_abundances2_melt[c("SampleName_microbe", "microbe_abundance_CLR")], by="SampleName_microbe") %>%
@@ -1093,7 +1093,7 @@ ui <- fluidPage(
   mainPanel(
     plotOutput("dotplot"),
     fluidRow(
-      column(4, selectInput("gene_selector", "Select microbe_gene:", choices = unique(residuals_melt_rural$microbe_gene))), #CHANGE HERE
+      column(4, selectInput("gene_selector", "Select microbe_gene:", choices = unique(residuals_melt_urban$microbe_gene))), #CHANGE HERE
       column(4, actionButton("prev_plot", "Previous Plot")),
       column(4, actionButton("next_plot", "Next Plot"))
     )
@@ -1103,14 +1103,14 @@ ui <- fluidPage(
 # Define the server
 server <- function(input, output, session) {
   # Create a list of unique microbe_gene values
-  unique_genes <- unique(residuals_melt_rural$microbe_gene) # AND HERE
+  unique_genes <- unique(residuals_melt_urban$microbe_gene) # AND HERE
   
   # Initialize a reactive value to keep track of the current index
   current_gene_index <- reactiveVal(1)
   
   # Create a reactive data subset based on the current index
   selected_data <- reactive({
-    dplyr::filter(residuals_melt_rural, microbe_gene == unique_genes[current_gene_index()]) #AND HERE
+    dplyr::filter(residuals_melt_urban, microbe_gene == unique_genes[current_gene_index()]) #AND HERE
   })
   
   # Create the dotplot
@@ -1182,7 +1182,7 @@ melted_gssls_urban$microbe <- factor(melted_gssls_urban$microbe, levels = unique
 
 ggplot(melted_gssls_urban, aes(x = l2fc_dir, y = microbe)) + 
  geom_point(aes(size = ifelse(n_l2fc_dir == 0, NA, n_l2fc_dir)), shape=18) +
-  scale_size_continuous(limits = c(0, 5000)) +
+  scale_size_continuous(limits = c(0, 1000)) +
   labs(size = "Number of host genes") + 
   labs(x = "Direction of\nDGE in host", fill = "# significant\nDE host genes") +
   #facet_grid(DA_urbanism ~ ., scales="free", space="free") +

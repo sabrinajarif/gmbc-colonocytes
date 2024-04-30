@@ -1,0 +1,375 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(biomaRt)
+library(clusterProfiler)
+library(ReactomePA)
+```
+
+```{r}
+## In Rstudio, find the path to the directory where the current script is located.
+## If not using Rstudio, current_dir should point to your working directory for this demo.
+current_dir <- dirname(rstudioapi::getSourceEditorContext()$path)
+```
+```{r}
+meta <- read.csv(paste0(current_dir,"/data/metadata/meta_RNAseq.csv"), row.names = 1) %>%
+  # Batch as character
+  mutate(Batch = as.character(Batch)) %>%
+  # exclude controls
+  dplyr::filter(!Luca_Lab_ID=="control") %>%
+  # This sample was bad quality 
+  dplyr::filter(!SampleID %in% c("GMCC1S1")) %>%
+  # These samples were outliers amongst the RNAseq
+  dplyr::filter(!SampleID %in% c("GMCC4S10", "GMCC3S7", "GMCC4C6", "GMCC5C5", "GMCC5C4", "GMCC5C3")) %>%
+  # These samples were not used to treat the colonocytes
+  dplyr::filter(!SampleName %in% c("1127XT", "1462QI", "3364PX", "3553XK", "3606IJ", "9423WC")) %>%
+  # These samples did not have metagenomic sequencing data
+  dplyr::filter(!SampleID %in% c("GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
+  # NOT SURE ABOUT THIS SAMPLE BUT IT WASNT IN FUNCTIONAL
+  dplyr::filter(!SampleID == "GMCC5S12")
+  #dplyr::filter(!SampleName=="4342XH")
+meta <- meta[order(row.names(meta)), ]
+
+meta_urban <- meta %>% dplyr::filter(urbanism=="urban")
+meta_urban <- meta_urban[order(row.names(meta_urban)), ]
+
+meta_rural <- meta %>% dplyr::filter(urbanism=="rural")
+meta_rural <- meta_rural[order(row.names(meta_rural)), ]
+
+```
+```{r}
+## load gene expression data
+# samples are rows, genes are columns
+#genes <- load_gene_expr(paste0(current_dir,"/input/gene_expresion_demo_sp_CCA.txt"))
+genes <- read.csv(paste0(current_dir,"/results/docs/raw_read_cts_filt.csv"), row.names = 1)
+genes <- genes[, colnames(genes) %in% meta$SampleID]
+genes <- genes[, order(colnames(genes))] %>% t() %>% as.matrix()
+
+dim(genes)
+```
+```{r}
+genes_urban <- genes[, rownames(genes) %in% meta_urban$SampleID]
+genes_urban <- genes_urban[order(rownames(genes_urban)),]
+
+genes_rural <- genes[, rownames(genes) %in% meta_rural$SampleID]
+genes_rural <- genes_rural[order(rownames(genes_rural)),]
+```
+```{r}
+## load microbiome functional data
+# samples are rows, individual taxa are columns
+# column names are like this: 
+# Bacteria;Bacteroidetes;Bacteroidia;Bacteroidales;Prevotellaceae
+
+#microbes <- load_microbiome_abnd(paste0(current_dir,"/input/microbiome_demo_sp_CCA.txt"))
+functions <- read.csv(paste0(current_dir,"/results/docs/pathway_abundances_filt2_r_t.csv")) %>%
+  dplyr::select(-X) %>%
+  left_join(meta[c("SampleName", "SampleID")],by="SampleName") %>%
+  dplyr::filter(SampleID %in% meta$SampleID) %>%
+  dplyr::select(-SampleName) %>%
+  column_to_rownames("SampleID") %>%
+  as.matrix()
+functions <- functions[order(rownames(functions)),] 
+dim(functions)
+
+## Ensure same samples in both genes and microbes data
+stopifnot(all(rownames(genes) == rownames(functions)))
+```
+
+Step 2: Tune hyperparameters
+
+```{r}
+## Skip to Step 3 if using pre-computed values above
+## select tuning parameters using grid-search
+#bestPenalty <- tune_params_grid_search(genes,functions)
+#bestpenaltyX <- bestPenalty[1]
+#bestpenaltyY <- bestPenalty[2]
+#bestpenaltyX <- 0.05
+#bestpenaltyY <- 0.3611111
+```
+```{r}
+bestpenaltyX <- 0.05
+bestpenaltyY <- 0.2
+```
+
+
+Step 3: Run sparse CCA
+```{r}
+## Set the number of desired CCA components
+cca.k = 10
+
+## run sparse CCA
+cca <- run_sparseCCA(genes, functions, cca.k, bestpenaltyX, bestpenaltyY,
+                     outputFile=paste0(current_dir,"/results/docs/CCA/functions/CCA_output_",bestpenaltyX,"_",bestpenaltyY,".txt"))
+cca_urban <- run_sparseCCA(genes_urban, functions, cca.k, bestpenaltyX, bestpenaltyY,
+                     outputFile=paste0(current_dir,"/results/docs/CCA/functions/CCA_urban_output_",bestpenaltyX,"_",bestpenaltyY,".txt"))
+cca_rural <- run_sparseCCA(genes_rural, functions, cca.k, bestpenaltyX, bestpenaltyY,
+                     outputFile=paste0(current_dir,"/results/docs/CCA/functions/CCA_rural_output_",bestpenaltyX,"_",bestpenaltyY,".txt"))
+
+## average number of genes and microbes in resulting components
+avg_genes <- get_avg_features(cca[[1]]$u, cca.k)
+avg_genes_urban <- get_avg_features(cca_urban[[1]]$u, cca.k)
+avg_genes_rural <- get_avg_features(cca_rural[[1]]$u, cca.k)
+avg_genes
+avg_genes_urban
+avg_genes_rural
+
+avg.functions <- get_avg_features(cca[[1]]$v, cca.k)
+avg.functions_urban <- get_avg_features(cca_urban[[1]]$v, cca.k)
+avg.functions_rural <- get_avg_features(cca_rural[[1]]$v, cca.k)
+avg.functions
+avg.functions_urban
+avg.functions_rural
+```
+Output is a text file that looks like this:
+
+Call: CCA(x = X, z = Z, typex = "standard", typez = "standard", penaltyx = penaltyX, 
+    penaltyz = penaltyZ, K = CCA.K, v = vInit)
+
+
+Num non-zeros u's:  56 52 56 58 85 129 304 477 604 563 
+Num non-zeros v's:  42 36 33 37 45 38 40 45 41 43 
+Type of x:  standard 
+Type of z:  standard 
+Penalty for x: L1 bound is  0.05 
+Penalty for z: L1 bound is  0.3222 
+Cor(Xu,Zv):  0.9073038 0.9204368 0.9055074 0.9295641 0.8482518 0.8713182 0.9100314 0.816952 0.9080543 0.8389779
+
+Step 4: Test significance of components using leave-one-out cross-validation
+```{r}
+## This will take ~1 min to run. 
+CCA_pval <- test_significance_LOOCV(genes, functions, bestpenaltyX, bestpenaltyY, cca.k)
+CCA_pval_urban <- test_significance_LOOCV(genes_urban, functions, bestpenaltyX, bestpenaltyY, cca.k)
+CCA_pval_rural <- test_significance_LOOCV(genes_rural, functions, bestpenaltyX, bestpenaltyY, cca.k)
+
+## which components have p-value < 0.1
+length(which(CCA_pval < 0.1)) 
+which(CCA_pval < 0.1)
+
+## adjust for multiple testing
+CCA_padj <- p.adjust(CCA_pval, method = "BH")
+CCA_padj_urban <- p.adjust(CCA_pval_urban, method = "BH")
+CCA_padj_rural <- p.adjust(CCA_pval_rural, method = "BH")
+length(which(CCA_padj < 0.1))
+which(CCA_padj < 0.1)
+```
+Step 5. Output significant components
+```{r}
+sig_cutoff <- 0.1 
+sig <- which(CCA_padj < sig_cutoff)
+sig_urban <- which(CCA_padj_urban < sig_cutoff)
+sig_rural <- which(CCA_padj_rural < sig_cutoff)
+dirname <- paste0(current_dir,"/results/docs/CCA/functions/CCA_gene_taxa_components_",bestpenaltyX,"_",bestpenaltyY,"/")
+dirname_urban <- paste0(current_dir,"/results/docs/CCA/functions/CCA_urban_gene_taxa_components_",bestpenaltyX,"_",bestpenaltyY,"/")
+dirname_rural <- paste0(current_dir,"/results/docs/CCA/functions/CCA_rural_gene_taxa_components_",bestpenaltyX,"_",bestpenaltyY,"/")
+## This returns returns true if directory didn't exist but was successfully created,
+## and returns false if the directory already exists or can't be created.
+ifelse(!dir.exists(dirname), dir.create(dirname), FALSE)
+ifelse(!dir.exists(dirname_urban), dir.create(dirname_urban), FALSE)
+ifelse(!dir.exists(dirname_rural), dir.create(dirname_rural), FALSE)
+save_CCA_components(cca[[1]],sig,dirname)
+save_CCA_components(cca_urban[[1]],sig_urban,dirname_urban)
+save_CCA_components(cca_rural[[1]],sig_rural,dirname_rural)
+```
+
+Each sparse CCA component includes non-zero weights (or canonical loadings) on gut microbes, and non-zero weights on a subset of host genes correlated with those gut microbes to capture joint variation in the two sets of observations. In the 2022 paper, we computed the first 10 sparse CCA components for each disease cohort, performing a separate computation for case and control samples. Sparse CCA components were computed iteratively, informed by previously computed components, thus resulting in uncorrelated components
+
+Example of output of first component:
+
+""	"gene"	"gene_coeff"	"taxa"	"taxa_coeff"
+"1"	"GFPT2"	"-0.254431304769467"	"Bacteria;Actinobacteria;Actinobacteria;Actinomycetales;Cellulomonadaceae"	"0.0249812131347486"
+"2"	"G0S2"	"-0.137297666144613"	"Bacteria;Actinobacteria;Coriobacteriia;Coriobacteriales;Coriobacteriaceae;Collinsella"	"-0.0148244930560778"
+"3"	"AVPR1A"	"-0.171512958610656"	"Bacteria;Actinobacteria;Coriobacteriia;Coriobacteriales;Coriobacteriaceae;Collinsella;aerofaciens"	"-0.0188094005428207"
+"4"	"SPON1"	"-0.0105963094345551"	"Bacteria;Actinobacteria;Coriobacteriia;Coriobacteriales;Coriobacteriaceae;Eggerthella;lenta"	"-0.129269896938538"
+"5"	"PTX3"	"-0.0165080949973823"	"Bacteria;Bacteroidetes"	"-0.282670982390855"
+"6"	"ADAMTS4"	"-0.0709393594399653"	"Bacteria;Bacteroidetes;Bacteroidia;Bacteroidales"	"-0.300058186797506"
+
+For further processing to visualize sparse CCA components, perform enrichment analysis on selected genes, etc., please check here.
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+ANALYSIS
+
+Obtain names of bacteria and genes associated with each cluster
+```{r}
+save_CCA_components_env <- function(CCA.out, CCA.K){
+  result_list <- list()  # Initialize an empty list to store data frames
+  ## Print canonical covariates in files 
+  for(i in CCA.K){
+    print(paste0("Writing significant component = ", i))
+    selected_X <- which(CCA.out$u[,i]!=0) 
+    selected_X <- rownames(CCA.out$u)[selected_X]
+    coeff_X <- unname(CCA.out$u[selected_X,i])
+    selected_Z <- which(CCA.out$v[,i]!=0)
+    selected_Z <- rownames(CCA.out$v)[selected_Z]
+    coeff_Z <- unname(CCA.out$v[selected_Z,i])
+    ## Make all vectors of same length to avoid repetition of elements from shorter vectors.
+    n <- max(length(selected_X), length(selected_Z))
+    length(selected_X) <- n                      
+    length(selected_Z) <- n
+    length(coeff_X) <- n
+    length(coeff_Z) <- n
+    selected_XZ <- as.data.frame(cbind(gene = selected_X, gene_coeff = coeff_X,
+                                       functions = selected_Z, functions_coeff = coeff_Z)) 
+    result_list[[paste0("component_", i)]] <- selected_XZ  # Append data frame to the list
+  }
+  return(result_list)
+}
+```
+
+```{r}
+# nested list of genes and microbes
+sig_urban_df <- save_CCA_components_env(cca_urban[[1]],sig_urban)
+sig_rural_df <- save_CCA_components_env(cca_rural[[1]],sig_rural)
+
+# microbes only
+sig_urban_functions <- lapply(sig_urban_df, function(df) na.omit(df$functions))
+sig_rural_functions <- lapply(sig_rural_df, function(df) na.omit(df$functions))
+
+# genes only
+sig_urban_genes <- lapply(sig_urban_df, function(df) df$gene)
+sig_rural_genes <- lapply(sig_rural_df, function(df) df$gene)
+```
+```{r}
+sig_urban_functions[[1]]
+```
+
+```{r}
+annotate_ensembl <- function(ensembl_ids) {
+  ensembl = useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl", host = "jul2023.archive.ensembl.org")
+
+  # Define annotations
+  att_interest <- c("ensembl_gene_id", "uniprot_gn_symbol", "uniprot_gn_id", "entrezgene_id")
+
+  # Annotate
+  annotated_data <- biomaRt::getBM(
+    attributes = att_interest,
+    filters = "ensembl_gene_id",
+    values = ensembl_ids,
+    mart = ensembl
+  )
+
+  return(annotated_data)
+}
+
+# Apply the annotation function to each list of Ensembl gene IDs in the nested list
+sig_urban_genes_anno <- lapply(sig_urban_genes, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+
+sig_rural_genes_anno <- lapply(sig_rural_genes, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+
+
+```
+
+Functional analysis
+```{r}
+uni <- colnames(genes)
+uni <- annotate_ensembl(uni)
+uni_uniprot <- unlist(list(uni$uniprot_gn_id))
+uni_entrez <- unlist(list(uni$entrez_gene_id))
+```
+KEGG
+```{r}
+kegg_urban_list <- lapply(sig_urban_genes_anno, function(component_data) {
+  # Extract the uniprot_gn_id from the component data
+  uniprot_gn_ids <- unlist(component_data$uniprot_gn_id)
+
+  # Perform enrichment analysis
+  kegg_urban <- enrichKEGG(
+    gene = uniprot_gn_ids,
+    universe = uni_uniprot,
+    keyType = "uniprot",
+    organism = 'hsa',
+    pvalueCutoff = 0.1
+  )
+
+  # Extract the result and filter for significant pathways
+  kegg_urban_res <- kegg_urban@result
+  kegg_urban_sig <- kegg_urban_res %>% dplyr::filter(p.adjust < 0.1)
+
+  return(kegg_urban_sig)
+})
+
+kegg_rural_list <- lapply(sig_rural_genes_anno, function(component_data) {
+  # Extract the uniprot_gn_id from the component data
+  uniprot_gn_ids <- unlist(component_data$uniprot_gn_id)
+
+  # Perform enrichment analysis
+  kegg_rural <- enrichKEGG(
+    gene = uniprot_gn_ids,
+    universe = uni_uniprot,
+    keyType = "uniprot",
+    organism = 'hsa',
+    pvalueCutoff = 0.1
+  )
+
+  # Extract the result and filter for significant pathways
+  kegg_rural_res <- kegg_rural@result
+  kegg_rural_sig <- kegg_rural_res %>% dplyr::filter(p.adjust < 0.1)
+
+  return(kegg_rural_sig)
+})
+
+```
+
+REACTOME
+```{r}
+reactome_urban_list <- lapply(sig_urban_genes_anno, function(component_data) {
+  
+  entrezgene_ids <- unlist(component_data$entrezgene_id)
+
+  # Perform enrichment analysis
+  reactome_urban <- enrichPathway(
+    gene = entrezgene_ids,
+    #universe = uni_uniprot,
+    #keyType = "uniprot",
+    #organism = 'hsa',
+    pvalueCutoff = 0.1
+  )
+
+  # Extract the result and filter for significant pathways
+  reactome_urban_res <- reactome_urban@result
+  reactome_urban_sig <- reactome_urban_res %>% dplyr::filter(p.adjust < 0.1)
+
+  return(reactome_urban_sig)
+})
+
+reactome_rural_list <- lapply(sig_rural_genes_anno, function(component_data) {
+  
+  entrezgene_ids <- unlist(component_data$entrezgene_id)
+
+  # Perform enrichment analysis
+  reactome_rural <- enrichPathway(
+    gene = entrezgene_ids,
+    #universe = uni_uniprot,
+    #keyType = "uniprot",
+    #organism = 'hsa',
+    pvalueCutoff = 0.1
+  )
+
+  # Extract the result and filter for significant pathways
+  reactome_rural_res <- reactome_rural@result
+  reactome_rural_sig <- reactome_rural_res %>% dplyr::filter(p.adjust < 0.1)
+
+  return(reactome_rural_sig)
+})
+```

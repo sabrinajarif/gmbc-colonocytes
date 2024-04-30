@@ -1,0 +1,150 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+```
+
+Load metadata
+```{r}
+meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
+  # Batch as character
+  mutate(Batch = as.character(Batch)) %>%
+  # exclude controls
+  dplyr::filter(!Luca_Lab_ID=="control") %>%
+  # This sample was bad quality 
+  dplyr::filter(!SampleID %in% c("GMCC1S1")) %>%
+  # These samples were outliers amongst the RNAseq
+  dplyr::filter(!SampleID %in% c("GMCC4S10", "GMCC3S7", "GMCC4C6", "GMCC5C5", "GMCC5C4", "GMCC5C3")) %>%
+  # These samples were not used to treat the colonocytes
+  dplyr::filter(!SampleName %in% c("1127XT", "1462QI", "3364PX", "3553XK", "3606IJ", "9423WC")) %>%
+  # These samples did not have metagenomic sequencing data
+  dplyr::filter(!SampleID %in% c("GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
+  # USA samples have no metadata
+  dplyr::filter(!country == "USA")
+row.names(meta) <- meta$SampleID
+meta <- meta[order(row.names(meta)), ]
+
+```
+Here are some of the interesting lifestyle variables (measured in stool with the exception of PC which is mostly surveys):
+- PC1_uw, PC2_uw, PC1_w, PC2_w: I think this means weighted and unweighted PC values based on host lifestyle
+- calpro: calprotectin stool test. High levels of calprotectin = inflammation of intestines
+- chromogranin: protein associated with tumors and other disease conditions
+- igm and iga: antibodies secreted in response to infection
+
+Let's just see what this looks like, divided among country and urbanism.
+```{r}
+test <- meta %>%
+  dplyr::select(c(SampleID, urbanism, country, PC1_uw, PC2_uw, PC1_w, PC2_w, calpro, chromogranin, igm, iga)) %>%
+  mutate_at(vars(-SampleID, -urbanism, -country), as.numeric)
+
+p_PC1_uw <- ggplot(test, aes(y= "PC1_uw", x = SampleID, fill = PC1_uw)) +
+  geom_tile(color = "white") +
+  facet_grid(~urbanism , scales = "free", space = "free") +
+  scale_fill_gradient(name = "", low = "white", high = "steelblue") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),     # Remove x-axis labels
+        axis.title.y = element_blank(),    # Remove y-axis title
+        axis.title.x = element_blank(),    # Remove x-axis title
+        strip.background = element_rect(fill = "grey"), 
+        legend.direction = "horizontal",  # Horizontal legend
+        legend.position = "right")       # Legend position
+
+p_PC2_uw <- ggplot(test, aes(y= "PC2_uw", x = SampleID, fill = PC2_uw)) +
+  geom_tile(color = "white") +
+  facet_grid(~urbanism , scales = "free", space = "free") +
+  scale_fill_gradient(name = "", low = "white", high = "skyblue") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),     # Remove x-axis labels
+        axis.title.y = element_blank(),    # Remove y-axis title
+        axis.title.x = element_blank(),    # Remove x-axis title
+        strip.text = element_blank(),     # Remove facet labels
+        strip.background = element_blank(), # Remove facet strip background
+        legend.direction = "horizontal",  # Horizontal legend
+        legend.position = "right")       # Legend position
+
+p_PC1_w <- ggplot(test, aes(y= "PC1_w", x = SampleID, fill = PC1_w)) +
+  geom_tile(color = "white") +
+  facet_grid(~urbanism , scales = "free", space = "free") +
+  scale_fill_gradient(name = "", low = "white", high = "turquoise4") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),     # Remove x-axis labels
+        axis.title.y = element_blank(),    # Remove y-axis title
+        axis.title.x = element_blank(),    # Remove x-axis title
+        strip.text = element_blank(),     # Remove facet labels
+        strip.background = element_blank(), # Remove facet strip background
+        legend.direction = "horizontal",  # Horizontal legend
+        legend.position = "right")       # Legend position
+
+p_PC2_w <- ggplot(test, aes(y= "PC2_w", x = SampleID, fill = PC2_w)) +
+  geom_tile(color = "white") +
+  facet_grid(~urbanism , scales = "free", space = "free") +
+  scale_fill_gradient(name = "", low = "white", high = "turquoise") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),     # Remove x-axis labels
+        axis.title.y = element_blank(),    # Remove y-axis title
+        axis.title.x = element_blank(),    # Remove x-axis title
+        strip.text = element_blank(),     # Remove facet labels
+        strip.background = element_blank(), # Remove facet strip background
+        legend.direction = "horizontal",  # Horizontal legend
+        legend.position = "right")       # Legend position
+
+p_calpro <- ggplot(test, aes(y= "calpro", x = SampleID, fill = calpro)) +
+  geom_tile(color = "white") +
+  facet_grid(~urbanism , scales = "free", space = "free") +
+  scale_fill_gradient(name = "", low = "white", high = "violetred3") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),     # Remove x-axis labels
+        axis.title.y = element_blank(),    # Remove y-axis title
+        axis.title.x = element_blank(),    # Remove x-axis title
+        strip.text = element_blank(),     # Remove facet labels
+        strip.background = element_blank(), # Remove facet strip background
+        legend.direction = "horizontal",  # Horizontal legend
+        legend.position = "right")       # Legend position
+
+p_igm <- ggplot(test, aes(y= "igm", x = SampleID, fill = igm)) +
+  geom_tile(color = "white") +
+  facet_grid(~urbanism , scales = "free", space = "free") +
+  scale_fill_gradient(name = "", low = "white", high = "green4") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),     # Remove x-axis labels
+        axis.title.y = element_blank(),    # Remove y-axis title
+        axis.title.x = element_blank(),    # Remove x-axis title
+        strip.text = element_blank(),     # Remove facet labels
+        strip.background = element_blank(), # Remove facet strip background
+        legend.direction = "horizontal",  # Horizontal legend
+        legend.position = "right")       # Legend position
+
+p_iga <- ggplot(test, aes(y= "iga", x = SampleID, fill = iga)) +
+  geom_tile(color = "white") +
+  facet_grid(~urbanism , scales = "free", space = "free") +
+  scale_fill_gradient(name = "", low = "white", high = "darkolivegreen2") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),     # Remove x-axis labels
+        axis.title.x = element_blank(),    # Remove x-axis title
+        strip.text = element_blank(),     # Remove facet labels
+        strip.background = element_blank(), # Remove facet strip background
+        legend.direction = "horizontal",  # Horizontal legend
+        legend.position = "right")       # Legend position
+
+library(ggpubr)
+ggarrange(p_PC1_uw, 
+          p_PC2_uw,
+          p_PC1_w,
+          p_PC2_w,
+          p_calpro,
+          p_igm,
+          p_iga,
+          ncol=1, align = "v", heights = c(1, 1, 1, 1, 1, 1, 1))
+ggsave("results/figs/testheatmap_deletelater.png")
+```
+From eyeballing this it looks like we're going to get the most results by testing PC1_uw or PC1_w.
+
+```{r}
+
+```
+
+

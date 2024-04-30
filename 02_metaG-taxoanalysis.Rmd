@@ -115,41 +115,11 @@ meta_phy <- sample_data(meta)
 phy <- phyloseq(abun_phy, tax_phy, meta_phy)
 phy
 ```
-Filtering: let's remove taxa with a relative abundance of 0.001% in > 50% of rural OR > 50% of urban taxa.
-```{r}
-# Create list of the SampleIDs corresponding to different groups
-urbanism_urban <- unlist(subset(meta$SampleName, meta$urbanism == "urban"))
-urbanism_urban <- urbanism_urban[!(urbanism_urban %in% remove_from_meta)]
-urbanism_rural <- unlist(subset(meta$SampleName, meta$urbanism == "rural"))
-urbanism_rural <- urbanism_rural[!(urbanism_rural %in% remove_from_meta)]
-
-phy_r = transform_sample_counts(phy,function(x){x / sum(x)})
-
-# Add columns to the counts matrix indicating the percentage of individuals with zero gene expression of each gene within a given group. 
-taxa_filt <- as.data.frame(otu_table(phy_r)) %>%
-  rownames_to_column('OTU') %>%
-  dplyr::mutate(perc1en5_urbanism_urban = rowSums(across(all_of(urbanism_urban))<=1/100000)/length(urbanism_urban)) %>%
-  dplyr::mutate(perc1en5_urbanism_rural = rowSums(across(all_of(urbanism_rural))<=1/100000)/length(urbanism_rural)) %>%
-# Keep genes which have abundance of 1e-5 values in less than or equal to 50% of urban group samples OR [cutoff value]% of rural group samples
-  subset(perc1en5_urbanism_urban <= 0.50 | perc1en5_urbanism_rural <= 0.50) %>%
-  dplyr::select(-(starts_with("perc1en5"))) %>%
-  `row.names<-`(., NULL) %>%
-  column_to_rownames("OTU") %>%
-  as.matrix()
-  
-# Execute prevalence filter, using `prune_taxa()` function
-keepTaxa = rownames(taxa_filt)
-phy_filt = prune_taxa(keepTaxa, phy)
-
-paste("Total number of taxa (filt cutoff = RA > 0.001%")
-paste("pre-filt: ", nrow(tax_table(phy)))
-paste0("post-filt: ", nrow(tax_table(phy_filt)))
-```
 
 Glom to different taxonomic levels. Important to update row names.
 ```{r}
 glom_func <- function(tax_level_quotes) {
-  phy_glom <- tax_glom(phy_filt, tax_level_quotes)
+  phy_glom <- tax_glom(phy, tax_level_quotes)
   otu <- as.data.frame(phyloseq::otu_table(phy_glom))
   tax <- as.data.frame(phyloseq::tax_table(phy_glom)) %>%
     dplyr::select(d:tax_level_quotes)
@@ -161,13 +131,103 @@ glom_func <- function(tax_level_quotes) {
   return(phy_glom_updated )
 }
 
-phy_filt_s <- glom_func("s")
-phy_filt_g <- glom_func("g")
-phy_filt_f <- glom_func("f")
-phy_filt_o <- glom_func("o")
-phy_filt_c <- glom_func("c")
-phy_filt_p <- glom_func("p")
+phy_s <- glom_func("s")
+phy_g <- glom_func("g")
+phy_f <- glom_func("f")
+phy_o <- glom_func("o")
+phy_c <- glom_func("c")
+phy_p <- glom_func("p")
+
+paste("# OTUs s: ", nrow(tax_table(phy_s)))
+paste("# OTUs g: ", nrow(tax_table(phy_g)))
+paste("# OTUs f: ", nrow(tax_table(phy_f)))
+paste("# OTUs o: ", nrow(tax_table(phy_o)))
+paste("# OTUs c: ", nrow(tax_table(phy_c)))
+paste("# OTUs p: ", nrow(tax_table(phy_p)))
 ```
+
+
+Filtering: let's retain taxa found at 0.001 relative abundance in at least 25% of the rural OR at least 25% of the urban samples
+```{r}
+# Create list of the SampleIDs corresponding to different groups
+urbanism_urban <- unlist(subset(meta$SampleName, meta$urbanism == "urban"))
+urbanism_urban <- urbanism_urban[!(urbanism_urban %in% remove_from_meta)]
+urbanism_rural <- unlist(subset(meta$SampleName, meta$urbanism == "rural"))
+urbanism_rural <- urbanism_rural[!(urbanism_rural %in% remove_from_meta)]
+
+keep_taxa_func <- function(phy_object){
+  
+  # first transform to relative abundance
+  phy_r = transform_sample_counts(phy_object,function(x){x / sum(x)})
+  
+  taxa_filt <- as.data.frame(otu_table(phy_r)) %>%
+  rownames_to_column('OTU') %>%
+  # Create a new column that indicates the percentage of samples that have a relative abundance greater than 0.001
+  dplyr::mutate(perc_greaterthan_1e3_urbanism_urban = 
+                  rowSums(across(all_of(urbanism_urban)) > 0.001)/length(urbanism_urban)) %>%
+  dplyr::mutate(perc_greaterthan_1e3_urbanism_rural = 
+                  rowSums(across(all_of(urbanism_rural)) > 0.001)/length(urbanism_rural)) %>%
+  # Select taxa that are found at 0.001 RA in at least 50% urban OR 50% rural
+  subset(perc_greaterthan_1e3_urbanism_urban >= 0.25 | perc_greaterthan_1e3_urbanism_rural >= 0.25) %>%
+  dplyr::select(-(starts_with("perc_greaterthan_1e3"))) %>%
+  `row.names<-`(., NULL) %>%
+  column_to_rownames("OTU") %>%
+  as.matrix()
+  
+  # Extract names of taxa to keep
+  keeptaxa = rownames(taxa_filt)
+  
+  return(keeptaxa)
+}
+
+phy_s_keep <- keep_taxa_func(phy_s)
+phy_g_keep <- keep_taxa_func(phy_g)
+phy_f_keep <- keep_taxa_func(phy_f)
+phy_o_keep <- keep_taxa_func(phy_o)
+phy_c_keep <- keep_taxa_func(phy_c)
+phy_p_keep <- keep_taxa_func(phy_p)
+
+  
+# Execute prevalence filter, using `prune_taxa()` function
+phy_filt_s <- prune_taxa(phy_s_keep, phy_s)
+phy_filt_g <- prune_taxa(phy_g_keep, phy_g)
+phy_filt_f <- prune_taxa(phy_f_keep, phy_f)
+phy_filt_o <- prune_taxa(phy_o_keep, phy_o)
+phy_filt_c <- prune_taxa(phy_c_keep, phy_c)
+phy_filt_p <- prune_taxa(phy_p_keep, phy_p)
+
+paste("Total number of taxa (filt cutoff = RA > 0.001 in 25% rural or urban")
+paste("pre-filt s: ", nrow(tax_table(phy_s)))
+paste0("post-filt s: ", nrow(tax_table(phy_filt_s)))
+paste("pre-filt g: ", nrow(tax_table(phy_g)))
+paste0("post-filt g: ", nrow(tax_table(phy_filt_g)))
+paste("pre-filt f: ", nrow(tax_table(phy_f)))
+paste0("post-filt f: ", nrow(tax_table(phy_filt_f)))
+paste("pre-filt o: ", nrow(tax_table(phy_o)))
+paste0("post-filt o: ", nrow(tax_table(phy_filt_o)))
+paste("pre-filt c: ", nrow(tax_table(phy_c)))
+paste0("post-filt c: ", nrow(tax_table(phy_filt_c)))
+paste("pre-filt p: ", nrow(tax_table(phy_p)))
+paste0("post-filt p: ", nrow(tax_table(phy_filt_p)))
+```
+```{r}
+# Total number of taxa pre-filt
+nrow(tax_table(phy_s)) +
+  nrow(tax_table(phy_g)) +
+  nrow(tax_table(phy_f)) +
+  nrow(tax_table(phy_o)) +
+  nrow(tax_table(phy_c)) +
+  nrow(tax_table(phy_p))
+
+# post-filt
+nrow(tax_table(phy_filt_s)) +
+  nrow(tax_table(phy_filt_g)) +
+  nrow(tax_table(phy_filt_f)) +
+  nrow(tax_table(phy_filt_o)) +
+  nrow(tax_table(phy_filt_c)) +
+  nrow(tax_table(phy_filt_p))
+```
+
 
 ALDEx2 for differential abundance testing. We will filter these a few steps later. Negative effect size indicates the microbe is primarily found in rural, positive effect size means urban.
 
@@ -320,7 +380,7 @@ aldex2_clr_all_sig <- rbind(aldex2_clr_s_sig, aldex2_clr_g_sig) %>%
   rbind(aldex2_clr_c_sig) %>%
   rbind(aldex2_clr_p_sig)
 
-write.csv(aldex2_clr_all_sig, "results/docs/DA_microbe_aldex2.csv")
+#write.csv(aldex2_clr_all_sig, "results/docs/DA_microbe_aldex2.csv")
 
 # plot
 aldex2_plot(aldex2_clr_s_res)
@@ -329,7 +389,22 @@ aldex2_plot(aldex2_clr_f_res)
 aldex2_plot(aldex2_clr_o_res)
 aldex2_plot(aldex2_clr_c_res)
 aldex2_plot(aldex2_clr_p_res)
+
 ```
+
+```{r}
+da_s <- aldex2_clr_s_sig %>%
+  rownames_to_column("Species") %>%
+  arrange(effect)
+da_s$Species <- factor(da_s$Species, levels = unlist(da_s$Species))
+
+ggplot(da_s, aes(x=effect, y=Species)) +
+  geom_point(aes(color=wi.eBH))
+```
+
+
+
+
 
 Apply CLR transformed values to phyloseq objects
 ```{r}
@@ -350,152 +425,43 @@ otu_table(phy_clr_filt_c) <- otu_table(aldex2_clr_c_cts, taxa_are_rows = T)
 
 phy_clr_filt_p <- phy_filt_p
 otu_table(phy_clr_filt_p) <- otu_table(aldex2_clr_p_cts, taxa_are_rows = T)
+
+paste("ALDEx2 significant OTUs:",nrow(aldex2_clr_all_sig))
 ```
-
-Relative abundance transformations for plotting and filtering purposes.
-```{r}
-# Transform to relative abundance
-phy_r_filt_s = transform_sample_counts(phy_filt_s,function(x){x / sum(x)})
-phy_r_filt_g = transform_sample_counts(phy_filt_g,function(x){x / sum(x)})
-phy_r_filt_f = transform_sample_counts(phy_filt_f,function(x){x / sum(x)})
-phy_r_filt_o = transform_sample_counts(phy_filt_o,function(x){x / sum(x)})
-phy_r_filt_c = transform_sample_counts(phy_filt_c,function(x){x / sum(x)})
-phy_r_filt_p = transform_sample_counts(phy_filt_p,function(x){x / sum(x)})
-# CLR transformation
-#phy_clr_filt_s <- microbiome::transform(phy_filt_s, "clr")
-#phy_clr_filt_g <- microbiome::transform(phy_filt_g, "clr")
-```
-
-Visualize in order to choose good filtering cutoffs
-```{r}
-summ_RA <- function(phy){
-  
-otu <- as.data.frame(phyloseq::otu_table(phy)) 
-otu2 <- otu %>%
-  t() %>%
-  as.data.frame() %>%
-  rownames_to_column("SampleName")
-
-samp <- phyloseq::sample_data(phy)
-samp2 <- samp %>%
-  data.frame() %>%
-  dplyr::select(SampleName, urbanism)
-
-# Combine and summarize data
-summ <- otu2 %>%
-  inner_join(samp2, by = "SampleName") %>%
-  group_by(urbanism) %>%
-  summarize(across(everything(), median)) %>%
-  dplyr::select(-SampleName)
-
-# Reshape the data
-summ <- summ %>%
-  pivot_longer(cols = -urbanism, names_to = "OTU", values_to = "median_abundance") %>%
-  mutate(median_abundance = as.numeric(median_abundance), median_abundance_perc = median_abundance * 100)
-
-}
-
-plot_RA <- function(summ) {
-  ggplot(summ, aes(x=median_abundance_perc, fill=urbanism)) +
-  geom_histogram( color="#e9ecef", alpha=0.8, position = 'identity') +
-  scale_fill_manual(values=c("#6FBD8B", "#7B2BC1")) +
-  #scale_y_log10() +
-  scale_x_log10(labels = scales::number_format(accuracy = 0.01)) +
-  theme_linedraw() +
-  facet_wrap(~urbanism)
-}
-
-summ_s <- summ_RA(phy_r_filt_s)
-plot_RA(summ_s)
-
-summ_g <- summ_RA(phy_r_filt_g)
-plot_RA(summ_g)
-
-summ_f <- summ_RA(phy_r_filt_f)
-plot_RA(summ_f)
-
-summ_o <- summ_RA(phy_r_filt_o)
-plot_RA(summ_o)
-
-summ_c <- summ_RA(phy_r_filt_c)
-plot_RA(summ_c)
-
-summ_p <- summ_RA(phy_r_filt_p)
-plot_RA(summ_p)
-```
-
-Eyeballing the data, these seem to be good cutoffs for downstream testing:
-* s: 0.1%
-* g: 0.1%
-* f: 0.5% 
-* o: 0.5%
-* c: 1%
-* p: 1%
 
 Make a list of the microbes we will look at downstream (if differentially abundant)
 ```{r}
-filter_perc <- function(summ, perc) {
-  x <- summ %>%
-    dplyr::filter(median_abundance_perc > perc)
-  unique(x$OTU)
-}
+# Combine significant results
+clr_filt <- rbind(aldex2_clr_p_cts, aldex2_clr_c_cts) %>%
+  rbind(aldex2_clr_o_cts) %>%
+  rbind(aldex2_clr_f_cts) %>%
+  rbind(aldex2_clr_g_cts) %>%
+  rbind(aldex2_clr_s_cts) 
 
-keep1 <- c(summ_s, summ_g, summ_f, summ_o, summ_c, summ_p)
-length(keep1$OTU)
+clr_filt_DA <- clr_filt[row.names(aldex2_clr_all_sig),]
 
-nrow(aldex2_clr_all_sig)
-
-keep_s <- filter_perc(summ_s, 0.1)
-keep_g <- filter_perc(summ_g, 0.1)
-keep_f <- filter_perc(summ_f, 0.5)
-keep_o <- filter_perc(summ_o, 0.5)
-keep_c <- filter_perc(summ_c, 1)
-keep_p <- filter_perc(summ_p, 1)
-
-keep2 <- c(keep_s, keep_g, keep_f, keep_o, keep_c, keep_p)
-length(keep2)
-
-keep3 <- keep2[keep2 %in% row.names(aldex2_clr_all_sig)]
-length(keep3)
+paste("pre-filt:",nrow(clr_filt))
+paste("post-filt:",nrow(clr_filt_DA))
 ```
-
-
-
 
 Save species and genus level abundances
 ```{r}
-DA_microbe_abundances <- rbind(aldex2_clr_s_cts, aldex2_clr_g_cts) %>%
-  rbind(aldex2_clr_f_cts) %>%
-  rbind(aldex2_clr_o_cts) %>%
-  rbind(aldex2_clr_c_cts) %>%
-  rbind(aldex2_clr_p_cts) %>%
+clr_filt_microbe_abundances <- clr_filt %>%
   t() %>%
-  data.frame %>%
-  dplyr::select(keep2) 
+  data.frame()
 
-relativeabun_func <- function(phy) {
-  output <- otu_table(phy) %>% as.data.frame()
-}
+write.csv(clr_filt_microbe_abundances, "results/docs/clr_filt_microbe_abundances.csv")
 
-DA_microbe_abundances_relativeabun <- rbind(relativeabun_func(phy_r_filt_s), relativeabun_func(phy_r_filt_g)) %>%
-  rbind(relativeabun_func(phy_r_filt_f)) %>%
-  rbind(relativeabun_func(phy_r_filt_o)) %>%
-  rbind(relativeabun_func(phy_r_filt_c)) %>%
-  rbind(relativeabun_func(phy_r_filt_p)) %>%
+clr_filt_DA_microbe_abundances <- clr_filt_DA %>%
   t() %>%
-  data.frame %>%
-  dplyr::select(keep2)
+  data.frame()
 
-#write.csv(DA_microbe_abundances, "results/docs/DA_microbe_abundances.csv")
-write.csv(DA_microbe_abundances_relativeabun, "results/docs/DA_microbe_abundances_relativeabun.csv")
-
-
-#genusspecies_clr_abundance <- cbind(t(as.data.frame(otu_table(phy_clr_filt_g))), t(as.data.frame(otu_table(phy_clr_filt))))
-#write.csv(genusspecies_clr_abundance, "results/docs/genusspecies_clr_abundance.csv")
-
-#genusspecies_css_abundance <- cbind(t(as.data.frame(otu_table(phy_css_r_filt_g))), t(as.data.frame(otu_table(phy_css_r_filt))))
-#write.csv(genusspecies_css_abundance, "results/docs/genusspecies_css_abundance.csv")
+write.csv(clr_filt_DA_microbe_abundances, "results/docs/clr_filt_DA_microbe_abundances.csv")
 ```
+
+
+
+
 Just for comparison, lets also do a clr transformation of the phyloseq data
 ```{r}
 phy_clr <- function(phy){
@@ -640,6 +606,20 @@ genus_clr_dist_urbanism <- ggplot(genus_clr_dist_select, aes(x=Axis.1, y=urbanis
 ggarrange(genus_clr_dist_pcoa, genus_clr_dist_urbanism, ncol=1, align = "v", heights=c(0.7, 0.3))
 #ggsave("results/figs/metaG-PCoA/species.png", width=5, height=4)
 ```
+
+Relative abundance transformations for plotting purposes.
+```{r}
+# Transform to relative abundance
+phy_r_filt_s = transform_sample_counts(phy_filt_s,function(x){x / sum(x)})
+phy_r_filt_g = transform_sample_counts(phy_filt_g,function(x){x / sum(x)})
+phy_r_filt_f = transform_sample_counts(phy_filt_f,function(x){x / sum(x)})
+phy_r_filt_o = transform_sample_counts(phy_filt_o,function(x){x / sum(x)})
+phy_r_filt_c = transform_sample_counts(phy_filt_c,function(x){x / sum(x)})
+phy_r_filt_p = transform_sample_counts(phy_filt_p,function(x){x / sum(x)})
+# CLR transformation
+#phy_clr_filt_s <- microbiome::transform(phy_filt_s, "clr")
+#phy_clr_filt_g <- microbiome::transform(phy_filt_g, "clr")
+```
 Genus barplot
 ```{r}
 g_plot_df <- phy_r_filt_g %>%
@@ -696,6 +676,69 @@ g_plot <- ggplot(g_plot_df, aes(x=SampleName, y=Abundance, fill=Genus)) +
 g_plot
 #ggsave("results/figs/metaG-stackedbar/genus.png", width=6.5, height=4)
 ```
+
+```{r}
+g_plot_df2 <- phy_r_filt_g %>%
+  psmelt() %>%
+  dplyr::select(g, Abundance) %>%
+  group_by(g) %>%
+  summarize(median = median(Abundance)) %>%
+  left_join(psmelt(phy_r_filt_g), by = "g") %>%
+  # Set threshold for "Other" coloring
+  mutate(Genus = case_when(median < 0.005 ~ paste0('zOther (', 0.005*100, '% or less)'),
+                             .default =g)) %>%
+  mutate(SampleName = as.factor(SampleName))
+
+s_res_ggplot <- aldex2_clr_s_res %>%
+  rownames_to_column("s") %>%
+  arrange(effect) %>%
+  mutate(sig = case_when(((wi.eBH < 0.005) & (effect > 0.8)) | ((wi.eBH < 0.005) & (effect < 0.8)) ~ "sig",
+                         FALSE ~ "ns")) %>%
+  merge(taxonomy_sep_select[,c("s","g")], by="s") %>%
+  merge(g_plot_df2[,c("g","Genus")], by="g")
+
+species_of_interest <- c("Bacteroides_vulgatus", "Alistipes_putredinis", "Faecalibacterium_sp")
+
+s_res_ggplot <- s_res_ggplot %>%
+  mutate(name = case_when(s %in% species_of_interest ~ s,
+                          FALSE ~ "")) %>%
+  mutate(name = str_replace_all(name, "_", " ")) %>%
+  mutate(shape = case_when(is.na(name) ~ "shape1",
+                           TRUE ~ "shape2"))
+```
+```{r}
+ggplot(s_res_ggplot, aes(x=effect, y=-log10(wi.eBH), label=name)) +
+  geom_point(aes(color=Genus), size=2) +
+  geom_text(fontface = "italic", hjust =1.05) +
+  xlab("Effect size") +
+  ylab("Significance [-log10(q)]") +
+  xlim(values=c(-1.2,1.2)) +
+  geom_hline(yintercept = -log10(0.005), linetype = "dashed", color = "gray") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
+  scale_color_manual(values=c(
+    "#e2711d", # Bacteroides
+    "#ff9100", # Blautia
+    "#ffaa00", # Clostridium
+    "#fee231", # Coprococcus
+    "#eeef20", # Dorea
+    "#c2cd4b", # Eubacterium
+    "#84ba63", # Faecalibacterium
+    "#4aa77c", # Oscillibacter
+    "#28947f", # Parabacteroides
+    "#2f94c6", # Prevotella
+    "#277ba5", # Roseburia
+    "#1f6284", # Ruminococcus
+    "darkgrey"# Other
+  )) +
+  theme_linedraw()
+ggsave("results/figs/volcano_f31.png", width=6, height=4)
+```
+
+
+
+
+
+
 Species barplot
 ```{r}
 s_plot_df <- phy_r_filt_s %>%
@@ -718,6 +761,7 @@ s_plot <- ggplot(s_plot_df, aes(x=SampleName, y=Abundance, fill=Species)) +
   #scale_color_manual(values=c("white", "red")) +
   geom_bar(aes(), stat="identity", position="stack") +
     scale_fill_manual(values=c(
+    "#9b5ef9", # Bacteroides vulgatus
     "#9b5de5", # Bacteroides vulgatus
     "#c65ccd", # Eubacterium rectale
     "#f15bb5", # Faecalibacterium prausnitzii
@@ -753,7 +797,7 @@ Now let's prepare the data we will use to export and test in DESeq. We will save
 \
 Medians
 ```{r}
-medians_s <- phy_css_r_filt %>%
+medians_s <- phy_clr_filt_s %>%
   otu_table() %>%
   as.data.frame() %>%
   rownames_to_column("s") %>%
@@ -765,7 +809,7 @@ medians_s <- phy_css_r_filt %>%
   dplyr::select(s) %>%
   unlist()
 
-medians_g <- phy_css_r_filt_g %>%
+medians_g <- phy_clr_filt_g %>%
   otu_table() %>%
   as.data.frame() %>%
   rownames_to_column("g") %>%
@@ -780,10 +824,10 @@ medians_g <- phy_css_r_filt_g %>%
 Associations with PC1-microbiome
 ```{r}
 # species
-pc1_s <- species_css_dist_vectors %>%
+pc1_s <- species_clr_dist_vectors %>%
   as.data.frame() %>%
   dplyr::select(Axis.1) %>%
-  merge(t(as.data.frame(otu_table(phy_css_r_filt))), by="row.names") %>%
+  merge(t(as.data.frame(otu_table(phy_clr_filt_s))), by="row.names") %>%
   column_to_rownames("Row.names")
 
 pc1cor_s <- apply(pc1_s[, colnames(pc1_s)], 2, function(x) {
@@ -804,10 +848,10 @@ pc1cor_s <- pc1cor_s %>% lapply(unlist)
 names(pc1cor_s) <- c("all", "rural", "urban")
 
 # genus
-pc1_g <- genus_css_dist_vectors %>%
+pc1_g <- genus_clr_dist_vectors %>%
   as.data.frame() %>%
   dplyr::select(Axis.1) %>%
-  merge(t(as.data.frame(otu_table(phy_css_r_filt_g))), by="row.names") %>%
+  merge(t(as.data.frame(otu_table(phy_clr_filt_g))), by="row.names") %>%
   column_to_rownames("Row.names")
 
 pc1cor_g <- apply(pc1_g[, colnames(pc1_g)], 2, function(x) {
@@ -832,14 +876,14 @@ Test differential abundance and generate candidate taxa for testing in DESeq2 (c
 https://www.nicholas-ollberding.com/post/introduction-to-the-statistical-analysis-of-microbiome-data-in-r/
 ```{r}
 # Convert OTU table and sample data to data frames
-aldex2_otu <- data.frame(phyloseq::otu_table(phy_css_r_filt)) 
+aldex2_otu <- data.frame(phyloseq::otu_table(phy_filt_s)) 
 colnames(aldex2_otu) <- sub("^X", "", colnames(aldex2_otu))
 aldex2_otu2 <- aldex2_otu %>%
   t() %>%
   as.data.frame() %>%
   rownames_to_column("SampleName")
 
-aldex2_samp <- phyloseq::sample_data(phy_css_r_filt)
+aldex2_samp <- phyloseq::sample_data(phy_clr_filt_s)
 aldex2_samp2 <- aldex2_samp %>%
   data.frame() %>%
   dplyr::select(SampleName, urbanism)
@@ -898,6 +942,46 @@ sig_aldex2_g <- aldex2_da_g %>%
   arrange(effect, wi.eBH) %>%
   dplyr::select(g, diff.btw, diff.win, effect, wi.ep, wi.eBH)
 head(sig_aldex2_g)
+
+aldex2_da_f <- ALDEx2::aldex(data.frame(phyloseq::otu_table(phy_filt_f)), phyloseq::sample_data(phy_filt_f)$urbanism, test="t", effect = TRUE, denom="iqlr")
+ALDEx2::aldex.plot(aldex2_da_f, type="MW", test="wilcox", called.cex = 1, cutoff = 0.05)
+
+sig_aldex2_f <- aldex2_da_f %>%
+  rownames_to_column(var = "f") %>%
+  filter(wi.eBH < 0.05) %>%
+  arrange(effect, wi.eBH) %>%
+  dplyr::select(f, diff.btw, diff.win, effect, wi.ep, wi.eBH)
+head(sig_aldex2_f)
+
+aldex2_da_o <- ALDEx2::aldex(data.frame(phyloseq::otu_table(phy_filt_o)), phyloseq::sample_data(phy_filt_o)$urbanism, test="t", effect = TRUE, denom="iqlr")
+ALDEx2::aldex.plot(aldex2_da_o, type="MW", test="wilcox", called.cex = 1, cutoff = 0.05)
+
+sig_aldex2_o <- aldex2_da_o %>%
+  rownames_to_column(var = "o") %>%
+  filter(wi.eBH < 0.05) %>%
+  arrange(effect, wi.eBH) %>%
+  dplyr::select(o, diff.btw, diff.win, effect, wi.ep, wi.eBH)
+head(sig_aldex2_o)
+
+aldex2_da_c <- ALDEx2::aldex(data.frame(phyloseq::otu_table(phy_filt_c)), phyloseq::sample_data(phy_filt_c)$urbanism, test="t", effect = TRUE, denom="iqlr")
+ALDEx2::aldex.plot(aldex2_da_c, type="MW", test="wilcox", called.cex = 1, cutoff = 0.05)
+
+sig_aldex2_c <- aldex2_da_c %>%
+  rownames_to_column(var = "c") %>%
+  filter(wi.eBH < 0.05) %>%
+  arrange(effect, wi.eBH) %>%
+  dplyr::select(c, diff.btw, diff.win, effect, wi.ep, wi.eBH)
+head(sig_aldex2_c)
+
+aldex2_da_p <- ALDEx2::aldex(data.frame(phyloseq::otu_table(phy_filt_p)), phyloseq::sample_data(phy_filt_p)$urbanism, test="t", effect = TRUE, denom="iqlr")
+ALDEx2::aldex.plot(aldex2_da_p, type="MW", test="wilcox", called.cex = 1, cutoff = 0.05)
+
+sig_aldex2_p <- aldex2_da_p %>%
+  rownames_to_column(var = "p") %>%
+  filter(wi.eBH < 0.05) %>%
+  arrange(effect, wi.eBH) %>%
+  dplyr::select(p, diff.btw, diff.win, effect, wi.ep, wi.eBH)
+head(sig_aldex2_p)
 ```
 Explanation of columns:
 
@@ -924,22 +1008,7 @@ names(diffabun_g) <- c("all", "rural", "urban")
 ```
 \
 \
-What microbes are shared among all of these lists?
-```{r}
-s_microbes <- c(pc1cor_s[1], diffabun_s[1], list(medians_s))
-names(s_microbes) <- c("PC1_correlation", "DiffAbun", "MostAbun")
-s_microbes <- stack(s_microbes) %>%
-  ggplot(aes(x=ind, y=values)) +
-  geom_tile()
-s_microbes
 
-g_microbes <- c(pc1cor_g[1], diffabun_g[1], list(medians_g))
-names(g_microbes) <- c("PC1_correlation", "DiffAbun", "MostAbun")
-g_microbes <- stack(g_microbes) %>%
-  ggplot(aes(x=ind, y=values)) +
-  geom_tile()
-g_microbes
-```
 While we are interested in how individual microbes correlate with host gene expression, we may get more power if we see how groups of microbes contribute to gene expression patterns. Ideally we are looking for sets of microbes that consistently appear in similar abundances sample-to-sample- even if their abundance is high in one sample and low in another. Then, even if we don't know exactly which microbe is causing the effect, we know that it's part of a specific set, and we know that set is associated with a certain lifestyle. 
 
 
@@ -950,6 +1019,17 @@ clustering approach
 
 
 
+```{r}
+test <- ALDEx2::aldex.clr(as.data.frame(phyloseq::otu_table(phy_filt_s)),
+                    mc.samples=128, 
+                    denom="all", 
+                    verbose=F,
+                    useMC=T) 
+
+test2 <- aldex.corr(test, as.numeric(sample_data(phy)$PC1_uw))
+test3 <- test2 %>% dplyr::filter(spearman.eBH < 0.1) %>% dplyr::select(spearman.erho, spearman.eBH)
+test3
+```
 
 
 

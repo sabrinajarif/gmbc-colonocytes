@@ -1,0 +1,268 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(biomaRt)
+library(clusterProfiler)
+library(ReactomePA)
+```
+
+Read in info from last notebook
+```{r}
+CCA_microbe_elements <- readRDS("results/rds/CCA_microbe_elements.rds")
+genes_urban = CCA_microbe_elements[["genes_urban"]]
+genes_rural = CCA_microbe_elements[["genes_rural"]]
+sig_urban_df = CCA_microbe_elements[["sig_urban_df"]]
+sig_rural_df = CCA_microbe_elements[["sig_rural_df"]]
+sig_urban_microbes = CCA_microbe_elements[["sig_urban_microbes"]]
+sig_rural_microbes = CCA_microbe_elements[["sig_rural_microbes"]]
+sig_urban_genes = CCA_microbe_elements[["sig_urban_genes"]]
+sig_rural_genes = CCA_microbe_elements[["sig_rural_genes"]]
+```
+
+TEMPORARY FIG FOR SLIDES
+```{r}
+example <- sig_rural_df$component_9 
+
+test = annotate_ensembl(sig_rural_genes$component_9)
+
+example2 <- example %>%
+  mutate(ensembl_gene_id = gene) %>%
+  merge(test, by="ensembl_gene_id") %>%
+  mutate(gene_coeff = as.numeric(gene_coeff)) %>%
+  arrange(desc(gene_coeff)) %>%
+  slice(1:10) %>%
+  mutate(filler="filler")
+example2$uniprot_gn_symbol <- factor(example2$uniprot_gn_symbol, levels=unique(example2$uniprot_gn_symbol))
+
+ggplot(example2, aes(x=filler, y=uniprot_gn_symbol, fill=gene_coeff)) +
+  scale_fill_gradient(low = "lightskyblue1", high = "deepskyblue") +
+  scale_y_discrete(limits = rev(levels(example2$uniprot_gn_symbol))) +
+  geom_tile() +
+  theme_linedraw()
+#ggsave("DELETELATER.png", width=4, height=3)
+
+example3 <- example %>%
+  filter(!is.na(taxa_coeff)) %>%
+  mutate(taxa_coeff = as.numeric(taxa_coeff)) %>%
+  mutate(filler="filler") %>%
+  arrange(desc(taxa_coeff)) 
+example3$taxa <- factor(example3$taxa, levels=unique(example3$taxa))
+
+ggplot(example3, aes(x=filler, y=taxa, fill=taxa_coeff)) +
+  scale_fill_gradient(low = "plum2", high = "mediumvioletred") +
+  scale_y_discrete(limits = rev(levels(example3$taxa))) +
+  geom_tile() +
+  theme_linedraw()
+ggsave("DELETELATER2.png", width=4, height=1.5)
+```
+
+
+Functional analysis
+```{r}
+annotate_ensembl <- function(ensembl_ids) {
+  ensembl = useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl", host = "jul2023.archive.ensembl.org")
+
+  # Define annotations
+  att_interest <- c("ensembl_gene_id", "uniprot_gn_symbol") #, "uniprot_gn_id", "entrezgene_id"
+
+  # Annotate
+  annotated_data <- biomaRt::getBM(
+    attributes = att_interest,
+    filters = "ensembl_gene_id",
+    values = ensembl_ids,
+    mart = ensembl
+  )
+
+  return(annotated_data)
+}
+
+# Apply the annotation function to each list of Ensembl gene IDs in the nested list
+sig_urban_genes_anno <- lapply(sig_urban_genes, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+
+
+sig_rural_genes_anno <- lapply(sig_rural_genes, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+
+
+```
+
+Functional analysis
+```{r}
+uni_urban <- genes_urban
+uni_urban <- annotate_ensembl(uni_urban)
+uni_urban_uniprot <- unlist(list(uni_urban$uniprot_gn_id))
+uni_urban_entrez <- unlist(list(uni_urban$entrez_gene_id))
+
+uni_rural <- genes_rural
+uni_rural <- annotate_ensembl(uni_rural)
+uni_rual_uniprot <- unlist(list(uni_rural$uniprot_gn_id))
+uni_rural_entrez <- unlist(list(uni_rural$entrez_gene_id))
+```
+```{r}
+library(msigdbr)
+
+# download databases of interest
+msigdb_cpPID = msigdbr(species = "human", category = "C2", subcategory = "CP:PID")
+msigdb_cpKEGG = msigdbr(species = "human", category = "C2", subcategory = "CP:KEGG")
+msigdb_cpREACTOME = msigdbr(species = "human", category = "C2", subcategory = "CP:REACTOME")
+msigdb_cpBIOCARTA = msigdbr(species = "human", category = "C2", subcategory = "CP:BIOCARTA")
+
+# Experimenting with pasting these all together to reduce code burden
+msigdb_cp <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>%
+  rbind(msigdb_cpPID) 
+
+# Summarize metrics from all pathways from all databases
+msigdb_cp_summary <- msigdb_cp %>%
+  group_by(gs_name) %>%
+  summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  # sambhawas filtering cutoffs
+  dplyr::filter(GeneCount > 5, GeneCount < 300)
+
+# Narrow down pathways that meet our thresholds  
+msigdb_cp_filt <- msigdb_cp %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpPID_filt <- msigdb_cpPID %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpKEGG_filt <- msigdb_cpKEGG %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpREACTOME_filt <- msigdb_cpREACTOME %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpBIOCARTA_filt <- msigdb_cpBIOCARTA %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+```
+clusterProfiler for enrichment analysis. Once again I am trying 3 different GSEAs: "shared", "uc" and "rc"
+```{r}
+library(clusterProfiler)
+
+# df of distinct gene symbols
+# TERM2GENE is a data frame with first column of term ID and second column of corresponding mapped gene
+msigdb_cp_t2g = msigdb_cp_filt %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+```
+```{r}
+# Initialize empty lists to store the results for each nested list of genes
+uc_enrich_res_list <- list()
+uc_enrich_sig_list <- list()
+
+# Iterate over each nested list of dataframes in uc_top
+for (i in seq_along(sig_urban_genes_anno)) {
+    df <- sig_urban_genes_anno[[i]]  # Extract the dataframe
+    # Extract symbols from the current dataframe
+    symbols <- df$uniprot_gn_symbol
+    
+    # Perform enrichment analysis for the current list of symbols
+    uc_enrich <- enricher(gene = unique(symbols),
+                          TERM2GENE = msigdb_cp_t2g,
+                          universe = uni_urban$hgnc_symbol)
+    
+    # Extract results
+    uc_enrich_res <- uc_enrich@result %>% mutate(model = "uc", component = names(sig_urban_genes_anno)[i])
+    uc_enrich_res <- uc_enrich_res %>% mutate(model_component = paste(model, component, sep="."))
+    
+    # Filter significant enrichments
+    uc_enrich_sig <- uc_enrich_res %>% filter(Count > 3, p.adjust < 0.1)
+    
+    # Store results for the current dataframe
+    uc_enrich_res_list[[length(uc_enrich_res_list) + 1]] <- uc_enrich_res
+    uc_enrich_sig_list[[length(uc_enrich_sig_list) + 1]] <- uc_enrich_sig
+}
+```
+```{r}
+# Initialize empty lists to store the results for each nested list of genes
+rc_enrich_res_list <- list()
+rc_enrich_sig_list <- list()
+
+for (i in seq_along(sig_rural_genes_anno)) {
+    df <- sig_rural_genes_anno[[i]]
+    # Extract symbols from the current dataframe
+    symbols <- df$uniprot_gn_symbol
+    
+    # Perform enrichment analysis for the current list of symbols
+    rc_enrich <- enricher(gene = unique(symbols),
+                          TERM2GENE = msigdb_cp_t2g,
+                          universe = uni_rural$hgnc_symbol)
+    
+    # Extract results
+    rc_enrich_res <- rc_enrich@result %>% mutate(model = "rc", component = names(sig_rural_genes_anno)[i])
+    rc_enrich_res <- rc_enrich_res %>% mutate(model_component = paste(model, component, sep="."))
+    
+    # Filter significant enrichments
+    rc_enrich_sig <- rc_enrich_res %>% filter(Count > 3, p.adjust < 0.1)
+    
+    # Store results for the current dataframe
+    rc_enrich_res_list[[length(rc_enrich_res_list) + 1]] <- rc_enrich_res
+    rc_enrich_sig_list[[length(rc_enrich_sig_list) + 1]] <- rc_enrich_sig
+}
+
+```
+
+Plot the results. Here I combined the results from my different enrichment tests "uc" and "rc"
+```{r}
+# Suppose uc_enrich_res and rc_enrich_res are nested lists of dataframes
+# Flatten the nested lists
+uc_enrich_res_flat <- bind_rows(rc_enrich_res_list)
+rc_enrich_res_flat <- bind_rows(rc_enrich_res_list)
+
+# Assuming uc_enrich_sig and rc_enrich_sig are also nested lists of dataframes
+uc_enrich_sig_flat <- bind_rows(uc_enrich_sig_list)
+rc_enrich_sig_flat <- bind_rows(rc_enrich_sig_list)
+
+# Now filter and bind the dataframes
+enriched_pathways <- rbind(uc_enrich_sig_flat, rc_enrich_sig_flat) %>%
+  mutate(db = case_when(
+    grepl("REACTOME", ID) ~ "Reactome",
+    grepl("KEGG", ID) ~ "KEGG",
+    grepl("PID", ID) ~ "PID",
+    TRUE ~ "Other"  # Add a default value for other cases
+  )) %>%
+  mutate(ID_2 = gsub("^[^_]+_", "", ID)) %>%
+  mutate(ID_2 = gsub("_", " ", ID_2)) %>%
+  mutate(ID_2 = paste0(toupper(substring(ID_2, 1, 1)), tolower(substring(ID_2, 2)))) %>%
+  mutate(neglog10_p.adjust = -log10(p.adjust)) %>%
+  mutate(neglog10_p.adjust = as.numeric(neglog10_p.adjust)) %>%
+  mutate(GeneRatio_numeric = sapply(strsplit(as.character(GeneRatio), "/"), function(x) as.numeric(x[1])/as.numeric(x[2]))) %>%
+  #arrange(GeneRatio_numeric)
+  arrange(GeneRatio_numeric)
+enriched_pathways$ID_2 <- factor(enriched_pathways$ID_2, levels=unique(enriched_pathways$ID_2))
+
+# I DON'T KNOW IF THIS IS THE BEST WAY TO DO THIS... 
+# BUT TO REDUCE REDUNDANCY, PICK ID_2 WITH LARGEST PADJ
+# IF SEVERAL HAVE SAME GENERATIO
+enriched_pathways2 <- enriched_pathways %>%
+  group_by(model_component, GeneRatio_numeric) %>%
+  slice(which.max(neglog10_p.adjust)) %>%
+  ungroup()
+
+ggplot(enriched_pathways, aes(x=GeneRatio_numeric, y=ID_2, fill=model, color=model, size=neglog10_p.adjust)) + 
+  geom_point() +
+  scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(model_component ~ ., scales="free", space="free") +
+  theme_linedraw()
+
+ggplot(enriched_pathways2, aes(x=GeneRatio_numeric, y=ID_2, fill=model, color=model, size=neglog10_p.adjust)) + 
+  geom_point() +
+  scale_y_discrete(position = "right") +
+  scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(model_component ~ ., scales="free", space="free") +
+  theme_linedraw() 
+ggsave("results/figs/RNAseq-metaG-microbe-SparseCCA/enriched_pathways2.png", width=8.5, height=4.5)
+
+```
+

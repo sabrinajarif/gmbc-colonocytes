@@ -1,0 +1,527 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(stringr)
+library(pheatmap)
+library(ensembldb)
+library(biomaRt)
+library(ggpubr)
+library(tidyverse)
+library(foreach)
+library(DESeq2)
+library(data.table)
+library(dplyr)
+```
+
+--------------------------------------------------------------------------------
+SETUP
+--------------------------------------------------------------------------------
+
+Load CLR-transformed abundances of microbes of interest
+```{r}
+# Read in CLR abundances of microbes
+DA_microbe_abundances <- read.csv("results/docs/clr_filt_DA_microbe_abundances.csv", row.names = 1)
+
+# ALDEx2 data
+aldex2_clr_all_sig <- read.csv("results/docs/DA_microbe_aldex2.csv", row.names = 1) %>%
+  rownames_to_column("microbe")
+
+# Attach to metadata
+meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
+  # Batch as character
+  mutate(Batch = as.character(Batch)) %>%
+  # exclude controls
+  dplyr::filter(!Luca_Lab_ID=="control") %>%
+  # This sample was bad quality 
+  dplyr::filter(!SampleID %in% c("GMCC1S1")) %>%
+  # These samples were outliers amongst the RNAseq
+  dplyr::filter(!SampleID %in% c("GMCC4S10", "GMCC3S7", "GMCC4C6", "GMCC5C5", "GMCC5C4", "GMCC5C3")) %>%
+  # These samples were not used to treat the colonocytes
+  dplyr::filter(!SampleName %in% c("1127XT", "1462QI", "3364PX", "3553XK", "3606IJ", "9423WC")) %>%
+  # These samples did not have metagenomic sequencing data
+  dplyr::filter(!SampleID %in% c("GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
+  # USA samples have no metadata
+  dplyr::filter(!country == "USA")
+row.names(meta) <- meta$SampleID
+meta <- meta[order(row.names(meta)), ]
+
+#DA_microbe_abundances2_melt <- DA_microbe_abundances %>%
+#  pivot_longer(
+#    cols = -c("SampleName"),
+#    names_to = "microbe",
+#    values_to = "microbe_abundance_CLR"
+#  ) %>%
+#  mutate(SampleName_microbe = paste(SampleName, microbe, sep = ";")) %>%
+#  left_join(aldex2_clr_all_sig, by="microbe")
+```
+Select columns of interest
+```{r}
+feature_select <- list(
+  categorical = list("Batch","country",
+                     "locality_density",
+                     "ethnicity",
+                     "urbanism",
+                     "lifestyle",
+                     "lifestyle2",
+                     "lifestyle3",
+                     "coculture",
+                     "SampleName"),
+  ordinal = list("bristol_stool_scale",
+                 "water_source",
+                 "tobacco",
+                 "exercice_per_week",
+                 "floor_type",
+                 "antibiotic",
+                 "antiparasite",
+                 "oral_topical_medication",
+                 "laxative",
+                 "purge"),
+  ordinal_food = list("Yogurt",
+                 "Butter",
+                 "Cheese",
+                 "Milk",
+                 "IceCream",
+                 "AnimalFat",
+                 "VegetalFat",
+                 "Pomes",
+                 "Plums",
+                 "Peaches",
+                 "Cherries",
+                 "Mangos",
+                 "Coconut",
+                 "LycheesLangsats",
+                 "Grapes",
+                 "Raspberries",
+                 "Cloudberries",
+                 "BushBerries",
+                 "Kiwifruits",
+                 "Oranges",
+                 "Lemons",
+                 "PassionFruit",
+                 "Banana",
+                 "Pineapple",
+                 "Papaya",
+                 "Guava",
+                 "Sugarcane",
+                 "Durian",
+                 "Kola",
+                 "Tamarind",
+                 "CacaoFruit",
+                 "BaobabFruit",
+                 "JackFruit",
+                 "Cainito",
+                 "Soursop",
+                 "DragonFruit",
+                 "Melon",
+                 "Nuts",
+                 "Lettuce",
+                 "OtherLeaves",
+                 "WaterSpinach",
+                 "ChineseBroccoli",
+                 "Cabbage",
+                 "Broccoli",
+                 "Cauliflower",
+                 "Okra",
+                 "ChiliPepper",
+                 "SweetPepper",
+                 "Tomato",
+                 "Cucumber",
+                 "Zucchini",
+                 "Pumpkin",
+                 "Eggplant",
+                 "Avocado",
+                 "GreenBeans",
+                 "Beans",
+                 "PetaiBeans",
+                 "Peas",
+                 "Lentil",
+                 "Beansprouts",
+                 "WingedBeans",
+                 "BaobabSeeds",
+                 "Yams",
+                 "Potatoes",
+                 "EkuoTuber",
+                 "Carrots",
+                 "Manioc",
+                 "TaroMacabo",
+                 "SweetPotatoes",
+                 "Beets",
+                 "Ginger",
+                 "Celery",
+                 "Asparagus",
+                 "Garlic",
+                 "Onions",
+                 "SweetHerbs",
+                 "PlantainGreenBanana",
+                 "Breadfruit",
+                 "Mushroom",
+                 "Egg",
+                 "MammalLivestockMeat",
+                 "BirdMeat",
+                 "FishMeat",
+                 "Shellfish",
+                 "Snail",
+                 "Snake",
+                 "Insect",
+                 "WildMammals",
+                 "Offal",
+                 "Millet",
+                 "Wheat",
+                 "Corn",
+                 "Rice",
+                 "Quinoa",
+                 "Pasta",
+                 "Bread",
+                 "Tortilla",
+                 "ProcessedCereals",
+                 "Craker",
+                 "FreshFruitJuice",
+                 "CoconutWater",
+                 "IndusFruitJuice",
+                 "CafFreeSoda",
+                 "Coffee",
+                 "Tea",
+                 "CaffeinatedSoda",
+                 "DietSoda",
+                 "Wine",
+                 "PalmWine",
+                 "Liquor",
+                 "Beer",
+                 "Cider",
+                 "Kombucha",
+                 "WildHoney",
+                 "Chocolate",
+                 "JamJellyHoney",
+                 "EnergyBar",
+                 "IndustrializedCookie",
+                 "Pastry",
+                 "ArtificialSweetener",
+                 "SugarCandiesSweets"),
+  binary = list("sex",
+                 "c_section",
+                 "breast_fed",
+                "travel_abroad_lastYear",
+                "access_to_electricity",
+                "animal_contact",
+                "supplement_traditional_medicine",
+                "food_intolerance"),
+  numeric = list("Shannon",
+                 "latitude",
+                 "age",
+                 "bmi",
+                 "household_size",
+                 "faith_diet",
+                 "calpro",
+                 "chromogranin",
+                 "igm",
+                 "iga")
+)
+
+numeric_vars <- unname(unlist(feature_select["numeric", drop = FALSE]))
+binary_vars <- unname(unlist(feature_select["binary", drop = FALSE]))
+ordinal_vars <- unname(unlist(feature_select["ordinal", drop = FALSE]))
+ordinal_food_vars <- unname(unlist(feature_select["ordinal_food", drop = FALSE]))
+categorical_vars <- unname(unlist(feature_select["categorical", drop = FALSE]))
+
+meta_select <- meta[,unlist(feature_select)]
+```
+Re-code binary
+```{r}
+convert_to_num <- function(column) {
+  unique_values <- unique(column)
+  sorted_values <- sort(unique_values)
+  numeric_mapping <- setNames(seq_along(sorted_values), sorted_values)
+  transformed_column <- as.numeric(factor(column, levels = sorted_values))
+  log_data <- data.frame(original_value = names(numeric_mapping), transformed_value = numeric_mapping)
+  return(list(transformed_column, log_data))
+}
+
+# Apply the function to each binary column
+binary_dict <- lapply(meta_select[binary_vars], convert_to_num)
+binary_dict <- binary_dict[match(binary_vars, names(binary_dict))]
+
+for (i in seq_along(binary_vars)) {
+  col_name <- binary_vars[i]
+  transformed_column <- binary_dict[[i]][[1]]
+  meta_select[[col_name]] <- transformed_column
+}
+```
+Re-code ordinal
+```{r}
+# Apply the function to each ordinal column
+ordinal_dict <- lapply(meta_select[ordinal_vars], convert_to_num)
+ordinal_dict <- ordinal_dict[match(ordinal_vars, names(ordinal_dict))]
+
+for (i in seq_along(ordinal_vars)) {
+  col_name <- ordinal_vars[i]
+  transformed_column <- ordinal_dict[[i]][[1]]
+  meta_select[[col_name]] <- transformed_column
+}
+```
+Re-code ordinal food
+```{r}
+# Apply the function to each ordinal column
+ordinal_food_dict <- lapply(meta_select[ordinal_food_vars], convert_to_num)
+ordinal_food_dict <- ordinal_food_dict[match(ordinal_food_vars, names(ordinal_food_dict))]
+
+for (i in seq_along(ordinal_food_vars)) {
+  col_name <- ordinal_food_vars[i]
+  transformed_column <- ordinal_food_dict[[i]][[1]]
+  meta_select[[col_name]] <- transformed_column
+}
+```
+```{r}
+meta_select <- meta_select %>%
+  # First, set numerics as numerics, obviously
+  dplyr::mutate(across(unname(unlist(feature_select["numeric"])), as.numeric)) %>%
+  # Statistically, binary values are treated the same way.
+  dplyr::mutate(across(unname(unlist(feature_select["binary"])), as.numeric)) %>%
+  # I guess it makes the most sense for ordinal data to be factor??
+  dplyr::mutate(across(unname(unlist(feature_select["ordinal"])), as.numeric)) %>%
+  dplyr::mutate(across(unname(unlist(feature_select["ordinal_food"])), as.numeric)) %>%
+  # Categorial is character
+  dplyr::mutate(across(unname(unlist(feature_select["categorical"])), as.character))
+
+table(sapply(meta_select, class))
+```
+```{r}
+library(corrplot)
+
+testRes = cor.mtest(meta_select[,c(numeric_vars, binary_vars)], conf.level = 0.95)
+corrplot(cor(meta_select[,c(numeric_vars, binary_vars)]), order = 'hclust', p.mat = testRes$p, insig='blank')
+```
+```{r}
+testRes2 = cor.mtest(meta_select[,c(ordinal_vars)], conf.level = 0.95)
+corrplot(cor(meta_select[,c( ordinal_vars)]), p.mat = testRes2$p, insig='blank', order = 'hclust')
+```
+```{r}
+testRes2 = cor.mtest(meta_select[,c(ordinal_food_vars)], conf.level = 0.95)
+corrplot(cor(meta_select[,c( ordinal_food_vars)]), p.mat = testRes2$p, insig='blank', addgrid.col = NA)
+```
+
+
+Filter metadata
+```{r}
+sd_values <- apply(meta_select, 2, sd)
+meta_select_sd <- data.frame(column = colnames(meta_select), sd_value = sd_values) %>%
+  mutate(
+    var_type = case_when(
+      column %in% categorical_vars ~ "Categorical",
+      column %in% ordinal_vars ~ "Ordinal",
+      column %in% ordinal_food_vars ~ "Ordinal (Food)",
+      column %in% binary_vars ~ "Binary",
+      column %in% numeric_vars ~ "Numeric",
+      TRUE ~ "Unknown"  # Add a default case if none of the above conditions are met
+    )
+  )
+
+# Create a bar plot with ggplot2
+ggplot(meta_select_sd, aes(x = sd_value)) +
+  #geom_bar(stat = "identity", fill = "skyblue") +
+  geom_histogram() +
+  facet_wrap(~var_type, scales="free") +
+  labs(title = "Numeric SDs", x = "Standard Deviation", y = "Number of Features")
+```
+
+```{r}
+# Identify columns with 0 unique values
+remove1 <- meta_select %>%
+  summarise(across(everything(), ~length(unique(.x)) == 1)) %>%
+  unlist()
+remove1 <- names(meta_select)[remove1]
+
+# Remove columns with low variability (specific to food vars)
+remove2 <- meta_select_sd %>%
+  dplyr::filter(column %in% ordinal_food_vars) %>%
+  dplyr::filter(sd_value < 0.5)
+remove2 <- remove2$column
+
+remove <- union(remove1, remove2)
+remove
+
+meta_select_filt <- meta_select[!names(meta_select) %in% remove]
+```
+```{r}
+testRes = cor.mtest(meta_select_filt[names(meta_select_filt) %in% ordinal_food_vars], conf.level = 0.95)
+
+#png(height=30, width=30, units="in", res=1200, file = "results/figs/testcor_deletelater.png")
+
+corrplot(cor(meta_select_filt[names(meta_select_filt) %in% ordinal_food_vars]), p.mat = testRes$p, insig='blank', order = 'hclust', addrect = 10, addgrid.col = NA)
+
+#dev.off()
+
+```
+PCA of remaining food vars
+
+```{r}
+# Assuming your dataframe is named df
+meta_select_filt_food <- meta_select_filt[, colnames(meta_select_filt) %in% ordinal_food_vars]
+
+# Perform PCA
+pca_result <- prcomp(meta_select_filt_food, scale. = TRUE)
+
+# Extract PC scores
+pc_scores <- as.data.frame(pca_result$x) %>% rownames_to_column("SampleID") %>% merge(meta[,c("SampleID", "urbanism","country")], by="SampleID")
+
+# Plotting PCA
+library(ggplot2)
+
+# Plot PC1 vs PC2
+ggplot(pc_scores, aes(x=PC1, y=urbanism, fill=urbanism)) +
+  geom_boxplot(alpha=0.65, outlier.size = 2.5) +
+  scale_fill_manual(values=c("#6FBD8B","#7B2BC1"), name = "Population") + #F42585
+  theme_linedraw()
+
+ggplot(pc_scores, aes(x=PC1, y=country, fill=country)) +
+  geom_boxplot(alpha=0.65, outlier.size = 2.5) +
+  scale_fill_manual(values=c("#00ccff","#00ffcc","#ffff00","#ff00cc"), name = "Country") + #F42585
+  theme_linedraw()
+
+```
+```{r}
+ggplot(pc_scores, aes(x=PC1, y=PC2, color=urbanism)) +
+  geom_point(alpha=0.7, size=2) +
+  scale_fill_manual(values=c("#6FBD8B","#7B2BC1"), name = "Population") + #F42585
+  theme_linedraw()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Choose one per correlation cluster
+```{r}
+keep_food <- c("SweetPotatoes",
+               "Sugarcane",
+               "JamJellyHoney",
+               "Lentil",
+               "Mangos",
+               "DietSoda",
+               "Durian",
+               "Egg",
+               "Pastry",
+               "AnimalFat"
+               )
+
+remove3 <- setdiff(ordinal_food_vars, keep_food)
+remove <- union(remove, remove3)
+
+meta_select_filt2 <- meta_select_filt[!names(meta_select_filt) %in% remove]
+
+ncol(meta)
+ncol(meta_select)
+ncol(meta_select_filt)
+ncol(meta_select_filt2)
+```
+```{r}
+meta_select_filt_nocat <- meta_select_filt %>%
+  dplyr::select(-one_of(categorical_vars))
+
+meta_select_filt2_nocat <- meta_select_filt2 %>%
+  dplyr::select(-one_of(categorical_vars))
+
+testRes = cor.mtest(meta_select_filt_nocat, conf.level = 0.95)
+corrplot(cor(meta_select_filt_nocat), p.mat = testRes$p, insig='blank', order = 'hclust', addgrid.col = NA)
+
+testRes2 = cor.mtest(meta_select_filt2_nocat, conf.level = 0.95)
+corrplot(cor(meta_select_filt2_nocat), p.mat = testRes2$p, insig='blank', order = 'hclust', addgrid.col = NA)
+```
+
+
+
+```{r}
+rownames(meta_select_filt2) <- meta_select_filt2$SampleName
+meta_select_filt2 <- meta_select_filt2[order(rownames(meta_select_filt2)), ]
+
+rownames(meta_select_filt2_nocat) <- meta_select_filt2_nocat$SampleName
+meta_select_filt2_nocat <- meta_select_filt2_nocat[order(rownames(meta_select_filt2_nocat)), ]
+
+DA_microbe_abundances2 <- DA_microbe_abundances[rownames(DA_microbe_abundances) %in% rownames(meta_select_filt2), , drop = FALSE]
+DA_microbe_abundances2 <- DA_microbe_abundances2[order(rownames(DA_microbe_abundances2)), ]
+
+head(meta_select_filt2)
+head(DA_microbe_abundances2)
+```
+```{r}
+metamicrobemat <- cbind(meta_select_filt2_nocat, DA_microbe_abundances2)
+
+metamicrobemat_stats <- cor.mtest(metamicrobemat, conf.level = 0.95)
+metamicrobemat_p <- metamicrobemat_stats$p %>%
+  as.data.frame() %>%
+  # rows as metadata
+  rownames_to_column("x_axis") %>%
+  dplyr::filter(x_axis %in% unlist(feature_select)) %>%
+  # columns as microbes
+  column_to_rownames("x_axis") %>%
+  dplyr::select(-one_of(unlist(feature_select))) %>%
+  as.matrix()
+  
+metamicrobemat_cor <- cor(metamicrobemat) %>%
+  as.data.frame() %>%
+  # rows as metadata
+  rownames_to_column("x_axis") %>%
+  dplyr::filter(x_axis %in% unlist(feature_select)) %>%
+  # columns as microbes
+  column_to_rownames("x_axis") %>%
+  dplyr::select(-one_of(unlist(feature_select))) %>%
+  as.matrix()
+
+corrplot(metamicrobemat_cor, p.mat = metamicrobemat_p, insig='blank', order = 'hclust', addgrid.col = NA)
+```
+
+
+```{r}
+metamicrobemat_padj <- metamicrobemat_p * ncol(metamicrobemat_p)
+
+# Threshold for p-values
+threshold <- 0.2
+
+# Find positions where p-values are less than 0.1
+significant_positions <- which(metamicrobemat_padj < threshold, arr.ind = TRUE)
+
+# Create a table with significant p-values, corresponding row names, and column names
+significant_table <- data.frame(
+  P_Value = metamicrobemat_padj[significant_positions],
+  Row_Name = rownames(metamicrobemat_padj)[significant_positions[, 1]],
+  Column_Name = colnames(metamicrobemat_padj)[significant_positions[, 2]]
+)
+
+# Use dplyr to remove duplicate entries
+unique_significant_table <- significant_table %>%
+  distinct(P_Value, Row_Name, Column_Name)
+
+# Print the resulting table without duplicates
+print(unique_significant_table)
+```
+```{r}
+library("heatmaply")
+## We use rcorr to calculate a matrix of p-values from correlation tests
+library("Hmisc")
+
+p <- heatmaply_cor(
+  metamicrobemat_cor,
+  node_type = "scatter",
+  point_size_mat = -log10(metamicrobemat_padj), 
+  point_size_name = "-log10 p-adj value",
+  label_names = c("x", "y", "Correlation")
+)
+
+```
+
+
+
