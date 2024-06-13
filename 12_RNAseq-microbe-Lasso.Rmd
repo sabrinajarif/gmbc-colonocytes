@@ -1,0 +1,875 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(biomaRt)
+library(clusterProfiler)
+library(ReactomePA)
+library(glmnet)
+library(hdi)
+library(stabs)
+library(DESeq2)
+library(limma)
+```
+
+```{r}
+## In Rstudio, find the path to the directory where the current script is located.
+## If not using Rstudio, current_dir should point to your working directory for this demo.
+current_dir <- dirname(rstudioapi::getSourceEditorContext()$path)
+```
+```{r}
+meta <- read.csv(paste0(current_dir,"/data/metadata/meta_RNAseq.csv"), row.names = 1) %>%
+  # Batch as character
+  mutate(Batch = as.character(Batch)) %>%
+  # exclude controls
+  dplyr::filter(!Luca_Lab_ID=="control") %>%
+  # This sample was bad quality 
+  dplyr::filter(!SampleID %in% c("GMCC1S1")) %>%
+  # These samples were outliers amongst the RNAseq
+  dplyr::filter(!SampleID %in% c("GMCC4S10", "GMCC3S7", "GMCC4C6", "GMCC5C5", "GMCC5C4", "GMCC5C3")) %>%
+  # These samples were not used to treat the colonocytes
+  dplyr::filter(!SampleName %in% c("1127XT", "1462QI", "3364PX", "3553XK", "3606IJ", "9423WC")) %>%
+  # These samples did not have metagenomic sequencing data
+  dplyr::filter(!SampleID %in% c("GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
+  mutate(rn = SampleID) %>%
+  column_to_rownames("rn") 
+  #dplyr::filter(!SampleName=="4342XH")
+meta <- meta[order(row.names(meta)), ]
+
+meta_urban <- meta %>% dplyr::filter(urbanism=="urban")
+meta_urban <- meta_urban[order(row.names(meta_urban)), ]
+
+meta_rural <- meta %>% dplyr::filter(urbanism=="rural")
+meta_rural <- meta_rural[order(row.names(meta_rural)), ]
+
+```
+
+
+```{r}
+## load gene expression data
+# samples are rows, genes are columns
+#genes <- load_gene_expr(paste0(current_dir,"/input/gene_expresion_demo_sp_CCA.txt"))
+genes <- read.csv(paste0(current_dir,"/results/docs/raw_read_cts_filt.csv"), row.names = 1)
+genes <- genes[, colnames(genes) %in% meta$SampleID]
+genes <- genes[, order(colnames(genes))] %>% t() %>% as.matrix() 
+
+```
+
+Perform batch correction
+```{r}
+genes_bc <- removeBatchEffect(t(genes), c(meta$Batch)) 
+```
+
+Apply variance stabilizing transformation from DESeq2
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = t(genes), 
+                              colData = meta, 
+                              design = ~ 1) 
+
+# Normalize the counts
+dds <- estimateSizeFactors(dds)
+normalized_counts <- counts(dds, normalized=TRUE)
+
+vsd <- vst(dds, blind = FALSE)
+
+normalized_counts_bc <- removeBatchEffect(normalized_counts, c(meta$Batch)) 
+# set negative values to 0
+normalized_counts_bc[normalized_counts_bc < 0] <- 0
+# round the values to the nearest integer
+normalized_counts_bc <- round(normalized_counts_bc)
+
+
+dds_bc <- DESeqDataSetFromMatrix(countData = normalized_counts_bc, 
+                                 colData = meta, 
+                                 design = ~ 1)
+
+vsd_bc <- vst(dds_bc, blind = FALSE)
+vsd_mat <- assay(vsd_bc)
+
+# Filter out genes with low variance using 25% quantile as cut-off for each disease cohort
+# Assuming 'meta' contains a column 'disease_cohort' that specifies the disease cohort for each sample
+# Adjust the column name 'disease_cohort' to the actual column name in your metadata
+
+filtered_genes_list <- lapply(unique(meta$urbanism), function(cohort) {
+  # Subset the transformed matrix and metadata for the current cohort
+  cohort_samples <- meta %>% filter(urbanism == cohort) %>% rownames()
+  cohort_vsd_mat <- vsd_mat[, cohort_samples]
+  
+  # Calculate variance for each gene in the current cohort
+  gene_variances <- apply(cohort_vsd_mat, 1, var)
+  
+  # Determine the 25% quantile of variance
+  variance_cutoff <- quantile(gene_variances, 0.25)
+  
+  # Filter genes with variance above the 25% quantile
+  filtered_genes <- rownames(cohort_vsd_mat)[gene_variances > variance_cutoff]
+  
+  return(filtered_genes)
+})
+
+# Combine the filtered gene lists from each cohort
+filtered_genes <- unique(unlist(filtered_genes_list))
+
+# Subset the transformed matrix to include only the filtered genes
+genes_bc_vst_varfilt <- vsd_mat[filtered_genes, ]
+
+# Check the dimensions of the filtered matrix
+dim(genes_bc_vst_varfilt)
+
+genes_bc_vst_varfilt <- t(genes_bc_vst_varfilt)
+```
+```{r}
+plotPCA(vsd, intgroup = "Batch")
+plotPCA(vsd_bc, intgroup = "Batch")
+```
+
+
+```{r}
+genes_urban <- genes_bc_vst_varfilt[rownames(genes_bc_vst_varfilt) %in% meta_urban$SampleID, ]
+genes_urban <- genes_urban[order(rownames(genes_urban)),]
+
+genes_rural <- genes_bc_vst_varfilt[rownames(genes_bc_vst_varfilt) %in% meta_rural$SampleID, ]
+genes_rural <- genes_rural[order(rownames(genes_rural)),]
+```
+
+```{r}
+## load microbiome data
+# samples are rows, individual taxa are columns
+# column names are like this: 
+# Bacteria;Bacteroidetes;Bacteroidia;Bacteroidales;Prevotellaceae
+
+#microbes <- load_microbiome_abnd(paste0(current_dir,"/input/microbiome_demo_sp_CCA.txt"))
+microbes <- read.csv(paste0(current_dir,"/results/docs/clr_filt_microbe_abundances.csv")) %>%
+  dplyr::rename("SampleName"=X) %>%
+  left_join(meta[c("SampleName", "SampleID")],by="SampleName") %>%
+  dplyr::filter(SampleID %in% meta$SampleID) %>%
+  dplyr::select(-SampleName) %>%
+  column_to_rownames("SampleID") %>%
+  as.matrix()
+microbes <- microbes[order(rownames(microbes)),] 
+
+microbes_urban <- microbes[rownames(microbes) %in% meta_urban$SampleID, ]
+microbes_urban <- microbes_urban[order(rownames(microbes_urban)),]
+
+microbes_rural <- microbes[rownames(microbes) %in% meta_rural$SampleID, ]
+microbes_rural <- microbes_rural[order(rownames(microbes_rural)),]
+```
+
+
+Combine covariates with microbes
+```{r}
+covariates <- meta %>%
+  dplyr::select(SampleName, SampleID, country, age, sex)
+covariates <- covariates[order(rownames(covariates)),] 
+
+# Impute missing values for USA samples
+# I IMPUTED THESE IN THE 02 MARKDOWN DOC BASED ON MICROBIOME PCS 1-5
+imputed_samples <- data.frame(
+  SampleName = c("FMG110", "FMG111", "FMG112", "FMG28", "FMG65"),
+  age = c(29,59,39,29,39),
+  sex= c("F","M","F","M","M")
+)
+
+covariates_imputed <- covariates
+rownames(covariates_imputed) <- NULL
+
+covariates_imputed$age[covariates_imputed$SampleName %in% imputed_samples$SampleName] <- imputed_samples$age
+covariates_imputed$age <- as.numeric(covariates_imputed$age)
+covariates_imputed$sex[covariates_imputed$SampleName %in% imputed_samples$SampleName] <- imputed_samples$sex
+
+# Convert categorical variables to factors
+covariates_imputed <- covariates_imputed %>%
+  dplyr::select(-SampleName) %>%
+  mutate(country = factor(country),
+         sex = factor(sex)) %>%
+  column_to_rownames("SampleID")
+
+# Dummy encode the factors using model.matrix
+covariates_imputed_ohe <- as.data.frame(model.matrix(~ country + sex - 1, data = covariates_imputed))
+
+# Filter for urban and rural
+covariates_imputed_ohe_urban <- microbes[rownames(covariates_imputed_ohe) %in% meta_urban$SampleID, ]
+covariates_imputed_ohe_rural <- microbes[rownames(covariates_imputed_ohe) %in% meta_rural$SampleID, ]
+
+# Join with microbe matrix
+microbes_covariates <- cbind(microbes, covariates_imputed_ohe) %>% as.matrix()
+microbes_covariates_urban <- cbind(microbes_urban, covariates_imputed_ohe_urban) %>% as.matrix()
+microbes_covariates_rural <- cbind(microbes_rural, covariates_imputed_ohe_rural) %>% as.matrix()
+
+## Ensure same samples in both genes and microbes data
+stopifnot(all(rownames(genes) == rownames(microbes_covariates)))
+```
+
+
+```{r}
+y <- genes_rural #genes_bc_vst_varfilt #response
+x <- microbes_covariates_rural #microbes_covariates #predictors
+
+x.uniq <- unique(x, MARGIN = 2)
+dim(x.uniq)
+x <- x.uniq
+
+print(paste0("# genes = ",dim(y)[2]))
+
+print(paste0("# microbes = ",dim(x)[2]))
+```
+
+
+```{r}
+############### Functions ############
+
+estimate.sigma <- function(x, y_i, bestlambda, tol) {
+  
+  lasso.fit = glmnet(x,y_i,alpha = 1)
+  # beta <- coef(lasso.fit, s = bestlambda)[-1] ## This gives coefficients of fitted model, not predicted coeff. 
+  # try(if(length(which(abs(beta) > tol)) > n) stop(" selected predictors more than number of samples! Abort function"))
+  
+  y = as.vector(y_i)
+  yhat = as.vector(predict(lasso.fit, newx = x, s = bestlambda))
+  beta = predict(lasso.fit,s=bestlambda, type="coef") ## predicted coefficients
+  df = sum(abs(beta) > tol) ## Number of non-zero coeff. Floating-point precision/tolerance used instead of checking !=0
+  n = length(y_i)
+  ss_res = sum((y - yhat)^2)
+  
+  if((n-df-1) >= 1) {
+    sigma = sqrt(ss_res / (n-df-1)) ## note, if we get rid of intercept when extracting beta, so should be drop -1?
+    sigma.flag = 0
+  } else{
+    
+    sigmas <- numeric()
+    ## Repeat 5x and take median of finite values else assign sigma to ss_res and raise the flag 
+    for( j in 1:5){
+      bestlambda = get.lambda(x, y_i, 10, 10)
+      lasso.fit = glmnet(x,y_i,alpha = 1)
+      y = as.vector(y_i)
+      yhat = as.vector(predict(lasso.fit, newx = x, s = bestlambda))
+      beta = predict(lasso.fit,s=bestlambda, type="coef") ## predicted coefficients
+      df = sum(abs(beta) > tol) ## Number of non-zero coeff. Floating-point precision/tolerance used instead of checking !=0
+      n = length(y_i)
+      ss_res = sum((y - yhat)^2)
+      if((n-df-1) >= 1) {
+        sigmas[j] = sqrt(ss_res / (n-df-1)) ## note, if we get rid of intercept when extracting beta, so should be drop -1?
+      }
+    }
+    if(length(sigmas != 0 )){
+      
+      sigma = median(sigmas, na.rm = T)
+      sigma.flag = 1
+    } else{
+      sigma = 1 ## conservative option
+      # sigma = ss_res ## lenient option
+      sigma.flag = 2
+    }
+    
+  }
+  
+  return(list(sigmahat = sigma, sigmaflag = sigma.flag, betahat = beta)) ## we return beta to be used later in hdi function.
+  
+}
+
+## Inspired from the details for estimateSigma() function in selectiveInference package: https://cran.r-project.org/web/packages/selectiveInference/selectiveInference.pdf
+estimate.sigma.loocv <- function(x, y_i, bestlambda, tol) {
+  
+  lasso.fit = glmnet(x,y_i,alpha = 1)
+  # beta <- coef(lasso.fit, s = bestlambda)[-1] ## This gives coefficients of fitted model, not predicted coeff. 
+  # try(if(length(which(abs(beta) > tol)) > n) stop(" selected predictors more than number of samples! Abort function"))
+  
+  y = as.vector(y_i)
+  yhat = as.vector(predict(lasso.fit, newx = x, s = bestlambda))
+  beta = predict(lasso.fit,s=bestlambda, type="coef") ## predicted coefficients
+  df = sum(abs(beta) > tol) ## Number of non-zero coeff. Floating-point precision/tolerance used instead of checking !=0
+  n = length(y_i)
+  ss_res = sum((y - yhat)^2)
+  
+  if((n-df-1) >= 1) {
+    sigma = sqrt(ss_res / (n-df-1)) ## note, if we get rid of intercept when extracting beta, so should be drop -1?
+    sigma.flag = 0
+  } else{
+      sigma = 1 ## conservative option
+      # sigma = ss_res ## lenient option
+      sigma.flag = 2
+    }
+    
+  
+  return(list(sigmahat = sigma, sigmaflag = sigma.flag, betahat = beta)) ## we return beta to be used later in hdi function.
+  
+}
+
+
+fit.cv.lasso <- function(x, y_i, kfold, repeats){
+  
+  lambdas = NULL
+  r.sqr.final <- numeric()
+  r.sqr.final.adj <- numeric()
+  r.sqr.CV.test <- numeric()
+  lasso.cv.list <- list()
+  
+  for (i in 1:repeats){
+    
+      ## glmnet CV
+      fit <- cv.glmnet(x, y_i, alpha=1, nfolds=kfold, type.measure = "mse", keep =TRUE, grouped=FALSE)  
+      errors = data.frame(fit$lambda,fit$cvm)
+      lambdas <- rbind(lambdas,errors)
+      
+      ## Get R^2 of final model
+      r.sqr.final[i] <- r_squared(as.vector(y_i), 
+                                  as.vector(predict(fit$glmnet.fit, 
+                                                    newx = x, s = fit$lambda.min)))
+      ## Get adjusted R^2
+      r.sqr.final.adj[i] <- adj_r_squared(r.sqr.final[i], n = nrow(x), 
+                                          p = sum(as.vector(coef(fit$glmnet.fit, 
+                                                                 s = fit$lambda.min)) > 0))
+      
+  }
+  
+  # take mean cvm for each lambda
+  lambdas <- aggregate(lambdas[, 2], list(lambdas$fit.lambda), mean)
+  # dim(lambdas)
+  # select the best one
+  bestindex = which(lambdas[2]==min(lambdas[2]))
+  bestlambda = lambdas[bestindex,1]
+  
+  return(list(bestlambda = bestlambda, r.sqr = median(r.sqr.final), 
+              r.sqr.adj = median(r.sqr.final.adj)
+              ))
+}
+
+## functions to compute R2
+## Adapted from https://rpubs.com/kaz_yos/alasso
+r_squared <- function(y, yhat) {
+  ybar <- mean(y)
+  ## Total SS
+  ss_tot <- sum((y - ybar)^2)
+  ## Residual SS
+  ss_res <- sum((y - yhat)^2)
+  ## R^2 = 1 - ss_res/ ss_tot
+  1 - (ss_res / ss_tot)
+}
+## Function for Adjusted R^2
+## n sample size, p number of prameters
+adj_r_squared <- function(r_squared, n, p) {
+  1 - (1 - r_squared) * (n - 1) / (n - p - 1)
+}
+
+############### Estimate sigma (standard deviation of the error term or noise) ###############
+
+estimate.sigma.fit.hdi <- function(x, y, gene_name){
+  ## Import all the libraries for the current node/core on MSI 
+  check.packages <- function(pkg){
+    new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+    if (length(new.pkg)) 
+      install.packages(new.pkg, dependencies = TRUE, repos = "http://cran.us.r-project.org")
+    sapply(pkg, require, character.only = TRUE)
+  }
+  
+  packages <- c("glmnet","hdi","methods","doParallel") ## package methods is not loaded by default by RScript on MSI 
+  check.packages(packages)
+  
+  print(paste0("Processing gene:", gene_name));flush.console()
+  
+  ## Extract the expression for this gene (response variable)
+  y_i <- y[,grep(paste0("^",gene_name,"$"),colnames(y))]
+  
+  ## Make sure y_i is numeric before model fitting 
+  #stopifnot(class(y_i) == "numeric") SABRINA REMOVED THIS BC VALUES ARE INTEGERS
+  
+  ## Fit lasso CV model
+  fit.model <- fit.cv.lasso(x, y_i,  kfold = length(y_i), repeats = 1)
+  bestlambda <- fit.model$bestlambda
+  r.sqr <- fit.model$r.sqr
+  r.sqr.adj <- fit.model$r.sqr.adj
+ 
+  ## Estimate sigma using the estimated lambda param
+  sigma.myfun <- estimate.sigma.loocv(x, y_i, bestlambda, tol=1e-4)
+  sigma <- sigma.myfun$sigmahat
+  beta <- as.vector(sigma.myfun$betahat)[-1]
+  sigma.flag <- sigma.myfun$sigmaflag
+  
+  ## Inference 
+  lasso.proj.fit <- lasso.proj(x, y_i, multiplecorr.method = "BH", betainit = beta, sigma = sigma, suppress.grouptesting = T)
+  lasso.ci <- as.data.frame(confint(lasso.proj.fit, level = 0.95))
+  lasso.FDR.df <- data.frame(gene = rep(gene_name, length(lasso.proj.fit$pval)), 
+                             taxa = names(lasso.proj.fit$pval.corr), 
+                             r.sqr = r.sqr, r.sqr.adj = r.sqr.adj,
+                             pval = lasso.proj.fit$pval, padj = lasso.proj.fit$pval.corr, 
+                             ci.lower = lasso.ci$lower, ci.upper = lasso.ci$upper,
+                             sigma = sigma, sigma.flag = sigma.flag,
+                             row.names=NULL)
+  
+ 
+  return(lasso.FDR.df)
+  
+}
+```
+
+
+Save everything as a big R object so we can run on midway
+```{r}
+input.genes.list <- colnames(y)
+
+lasso_obj_test <- list( 
+  # functions
+  estimate.sigma,
+  estimate.sigma.loocv,
+  fit.cv.lasso,
+  r_squared,
+  adj_r_squared,
+  estimate.sigma.fit.hdi,
+  # variables
+  y[,1:10],
+  x[,1:10],
+  input.genes.list[1:10]
+  )
+names(lasso_obj_test) <- c(  # functions
+  "estimate.sigma",
+  "estimate.sigma.loocv",
+  "fit.cv.lasso",
+  "r_squared",
+  "adj_r_squared",
+  "estimate.sigma.fit.hdi",
+  # variables
+  "y",
+  "x",
+  "input.genes.list")
+
+saveRDS(lasso_obj_test, "data/for_hpc/lasso_obj_test.rds")
+```
+
+
+Import after running lasso and stability selection.
+```{r}
+# lasso results
+lasso_all <- read.table("results/docs/lasso/lasso_hdi_all.txt")
+lasso_urban <- read.table("results/docs/lasso/lasso_hdi_urban.txt")
+lasso_rural <- read.table("results/docs/lasso/lasso_hdi_rural.txt")
+
+# stability selection
+ss_all <- read.table("results/docs/lasso/stabs_stabsel_output_all.txt")
+ss_urban <- read.table("results/docs/lasso/stabs_stabsel_output_urban.txt")
+ss_rural <- read.table("results/docs/lasso/stabs_stabsel_output_rural.txt")
+```
+
+```{r}
+head(lasso_all)
+head(ss_all)
+```
+```{r}
+ss_overlap <- function(lasso_df, ss_df) {
+  ss_select <- ss_df %>% 
+  dplyr::filter(!taxa.selected=="None") %>% 
+  dplyr::rename("gene" = "gene_name") %>% 
+  dplyr::rename("taxa" = "taxa.selected")
+overlap <- merge(lasso_df, ss_select, by = c("gene","taxa")) %>%
+  dplyr::filter(!taxa %in% c("sexM", 
+                         "sexF", 
+                         "countryGhana",
+                         "countryRwanda",
+                         "countryNigeria",
+                         "countryMalaysia",
+                         "countryUSA" )) %>%
+  mutate(gene_taxa = paste(gene, taxa, sep=":")) %>%
+  dplyr::filter(padj < 0.1)
+return(overlap)
+}
+
+ss_select_all <- ss_overlap(lasso_all, ss_all)
+ss_select_urban <- ss_overlap(lasso_urban, ss_urban)
+ss_select_rural <- ss_overlap(lasso_rural, ss_rural)
+
+nrow(ss_select_all)
+nrow(ss_select_urban)
+nrow(ss_select_rural)
+```
+```{r}
+summary_ss_select_all <- ss_select_all %>%
+  group_by(taxa) %>%
+  summarize(num_genes = n()) %>%
+  arrange(desc(num_genes))
+
+summary_ss_select_urban <- ss_select_urban %>%
+  group_by(taxa) %>%
+  summarize(num_genes = n()) %>%
+  arrange(desc(num_genes))
+
+summary_ss_select_rural <- ss_select_rural %>%
+  group_by(taxa) %>%
+  summarize(num_genes = n()) %>%
+  arrange(desc(num_genes))
+```
+Check for overlap between lasso models
+```{r}
+common_values <- Reduce(intersect, list(ss_select_rural$gene_taxa, ss_select_urban$gene_taxa))
+common_values
+```
+Print the genes that match to interesting microbes
+```{r}
+test <- ss_select_rural %>%
+  filter(taxa == "Unknown_genus_15") %>%
+  pull(gene)
+library(clipr)
+write_clip(test)
+```
+
+
+Check for overlap with sparse cca data
+```{r}
+CCA_microbe_elements <- readRDS("results/rds/CCA_microbe_elements_all.rds")
+genes = CCA_microbe_elements[["genes"]]
+genes_urban = CCA_microbe_elements[["genes_urban"]]
+genes_rural = CCA_microbe_elements[["genes_rural"]]
+sig_df = CCA_microbe_elements[["sig_all_df"]]
+sig_urban_df = CCA_microbe_elements[["sig_urban_df"]]
+sig_rural_df = CCA_microbe_elements[["sig_rural_df"]]
+sig_microbes = CCA_microbe_elements[["sig_all_microbes"]]
+sig_urban_microbes = CCA_microbe_elements[["sig_urban_microbes"]]
+sig_rural_microbes = CCA_microbe_elements[["sig_rural_microbes"]]
+sig_genes = CCA_microbe_elements[["sig_all_genes"]]
+sig_urban_genes = CCA_microbe_elements[["sig_urban_genes"]]
+sig_rural_genes = CCA_microbe_elements[["sig_rural_genes"]]
+```
+Make new df that is same structure to ss lasso
+```{r}
+process_nested_element <- function(cca_element) {
+  # Extract and clean the microbes list
+  microbes <- unlist(cca_element$taxa)
+  microbes <- microbes[!is.na(microbes)]
+  
+  # Extract the unique genes
+  genes <- unique(cca_element$gene)
+  
+  # Create a data frame with the Cartesian product of genes and microbes
+  gene_microbe_pairs <- expand.grid(gene = genes, taxa = microbes)
+  
+  # Create the gene_taxa column
+  gene_microbe_pairs <- gene_microbe_pairs %>%
+    mutate(gene_taxa = paste(gene, taxa, sep=":"))
+  
+  return(gene_microbe_pairs)
+}
+
+# Main function to process nested list
+cca_format <- function(nested_list) {
+  lapply(nested_list, process_nested_element)
+}
+
+sig_df_format <- cca_format(sig_df)
+sig_urban_df_format <- cca_format(sig_urban_df)
+sig_rural_df_format <- cca_format(sig_rural_df)
+```
+```{r}
+# Function to filter each data frame in the nested list by another data frame using gene_taxa
+filter_by_gene_taxa <- function(nested_list, filter_df) {
+  lapply(nested_list, function(df) {
+    df %>% filter(gene_taxa %in% filter_df$gene_taxa)
+  })
+}
+```
+```{r}
+cca_lasso_overlap_all <- filter_by_gene_taxa(sig_df_format, ss_select_all)
+cca_lasso_overlap_urban <- filter_by_gene_taxa(sig_urban_df_format, ss_select_urban)
+cca_lasso_overlap_rural <- filter_by_gene_taxa(sig_rural_df_format, ss_select_rural)
+```
+
+
+```{r}
+# Create a nested list of data frames by unique values in the 'taxa' column
+ss_select_all_nested <- split(ss_select_all, ss_select_all$taxa)
+ss_select_urban_nested <- split(ss_select_urban, ss_select_urban$taxa)
+ss_select_rural_nested <- split(ss_select_rural, ss_select_rural$taxa)
+
+# Pare down to microbes with >10 genes
+ss_select_all_nested10 <- Filter(function(df) nrow(df) >= 10, ss_select_all_nested)
+ss_select_urban_nested10 <- Filter(function(df) nrow(df) >= 10, ss_select_urban_nested)
+ss_select_rural_nested10 <- Filter(function(df) nrow(df) >= 10, ss_select_rural_nested)
+```
+
+Functional analysis
+```{r}
+annotate_ensembl <- function(ensembl_ids) {
+  ensembl = useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl") #, host = "jul2023.archive.ensembl.org"
+
+  # Define annotations
+  att_interest <- c("ensembl_gene_id", "uniprot_gn_symbol") #, "uniprot_gn_id", "entrezgene_id"
+
+  # Annotate
+  annotated_data <- biomaRt::getBM(
+    attributes = att_interest,
+    filters = "ensembl_gene_id",
+    values = ensembl_ids,
+    mart = ensembl
+  )
+
+  return(annotated_data)
+}
+```
+
+```{r}
+# Apply the annotation function to each list of Ensembl gene IDs in the nested list
+ss_select_all_nested10_anno <- lapply(ss_select_all_nested10, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+```
+```{r}
+ss_select_urban_nested10_anno <- lapply(ss_select_urban_nested10, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+```
+```{r}
+ss_select_rural_nested10_anno <- lapply(ss_select_rural_nested10, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+```
+
+Define universe
+```{r}
+uni <- rownames(genes_bc)
+uni <- annotate_ensembl(uni)
+uni_uniprot <- unlist(list(uni$uniprot_gn_id))
+uni_entrez <- unlist(list(uni$entrez_gene_id))
+
+uni_urban <- rownames(genes_urban)
+uni_urban <- annotate_ensembl(uni_urban)
+uni_urban_uniprot <- unlist(list(uni_urban$uniprot_gn_id))
+uni_urban_entrez <- unlist(list(uni_urban$entrez_gene_id))
+
+uni_rural <- rownames(genes_rural)
+uni_rural <- annotate_ensembl(uni_rural)
+uni_rual_uniprot <- unlist(list(uni_rural$uniprot_gn_id))
+uni_rural_entrez <- unlist(list(uni_rural$entrez_gene_id))
+```
+
+
+```{r}
+library(msigdbr)
+
+#msigdbr_collections()
+
+# download databases of interest
+msigdb_h = msigdbr(species = "human", category = "H")
+msigdb_cpPID = msigdbr(species = "human", category = "C2", subcategory = "CP:PID")
+msigdb_cpKEGG = msigdbr(species = "human", category = "C2", subcategory = "CP:KEGG")
+msigdb_cpREACTOME = msigdbr(species = "human", category = "C2", subcategory = "CP:REACTOME")
+msigdb_cpBIOCARTA = msigdbr(species = "human", category = "C2", subcategory = "CP:BIOCARTA")
+msigdb_cgp = msigdbr(species = "human", category = "C2", subcategory = "CGP") %>%
+  mutate(gs_name = paste("CGP", gs_name, sep = "_"))
+msigdb_cgn = msigdbr(species = "human", category = "C4", subcategory = "CGN") %>%
+  mutate(gs_name = paste("CGN", gs_name, sep = "_"))
+msigdb_cm = msigdbr(species = "human", category = "C4", subcategory = "CM") %>%
+  mutate(gs_name = paste("CM", gs_name, sep = "_"))
+msigdb_IMMUNESIGDB = msigdbr(species = "human", category = "C7", subcategory = "IMMUNESIGDB") %>%
+  mutate(gs_name = paste("IMMUNESIGDB", gs_name, sep = "_"))
+
+# Experimenting with pasting these all together to reduce code burden
+msigdb_cp <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>%
+  rbind(msigdb_cpPID)
+
+msigdb_all <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>% #, msigdb_cpREACTOME
+  rbind(msigdb_cpPID) %>%
+  rbind(msigdb_cpBIOCARTA) %>%
+  rbind(msigdb_h) #%>%
+  #rbind(msigdb_cgp) %>%
+  #rbind(msigdb_cgn) %>%
+  #rbind(msigdb_cm)  %>%
+  #rbind(msigdb_IMMUNESIGDB)
+  
+# Summarize metrics from all pathways from all databases
+msigdb_cp_summary <- msigdb_cp %>%
+  group_by(gs_name) %>%
+  summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  # sambhawas filtering cutoffs
+  dplyr::filter(GeneCount > 25, GeneCount < 300)
+
+msigdb_all_summary <- msigdb_all %>%
+  group_by(gs_name) %>%
+  summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  # sambhawas filtering cutoffs
+  dplyr::filter(GeneCount > 25, GeneCount < 300)
+
+# Narrow down pathways that meet our thresholds  
+msigdb_cp_filt <- msigdb_cp %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpPID_filt <- msigdb_cpPID %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpKEGG_filt <- msigdb_cpKEGG %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpREACTOME_filt <- msigdb_cpREACTOME %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpBIOCARTA_filt <- msigdb_cpBIOCARTA %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+
+msigdb_all_filt <- msigdb_all %>%
+  dplyr::filter(gs_name %in% msigdb_all_summary$gs_name)
+```
+
+clusterProfiler for enrichment analysis.
+```{r}
+library(clusterProfiler)
+
+# df of distinct gene symbols
+# TERM2GENE is a data frame with first column of term ID and second column of corresponding mapped gene
+msigdb_cp_t2g = msigdb_all_filt %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+```
+
+```{r}
+perform_enrichment <- function(input, msigdb_cp_t2g, uni, model, dir) {
+  enrich_res_list <- list()  # List to store all enrichment results
+  enrich_sig_list <- list()  # List to store significant enrichments
+  
+  for (i in seq_along(input)) {
+    df <- input[[i]]  # Extract the dataframe
+    # Extract symbols from the current dataframe
+    symbols <- df$uniprot_gn_symbol
+    
+    # Perform enrichment analysis for the current list of symbols
+    enrich <- enricher(gene = unique(symbols),
+                       TERM2GENE = msigdb_cp_t2g,
+                       universe = uni$hgnc_symbol)
+    
+    # Extract results
+    enrich_res <- enrich@result %>% mutate(model = model, dir = dir, component = names(input)[i])
+    enrich_res <- enrich_res %>% mutate(model_dir_component = paste(model, dir, component, sep="."))
+    
+    # Filter significant enrichments
+    enrich_sig <- enrich_res %>% filter(Count > 2, p.adjust < 0.1)
+    
+    # Store results for the current dataframe
+    enrich_res_list[[i]] <- enrich_res
+    enrich_sig_list[[i]] <- enrich_sig
+  }
+  
+  return(list(enrich_res_list = enrich_res_list, enrich_sig_list = enrich_sig_list))
+}
+
+```
+
+```{r}
+sig_genes_anno_enrich <- perform_enrichment(ss_select_all_nested10_anno, msigdb_cp_t2g, uni, "all", "NA")
+
+sig_urban_genes_anno_enrich <- perform_enrichment(ss_select_urban_nested10_anno, msigdb_cp_t2g, uni_urban, "urban", "NA")
+
+sig_rural_genes_anno_enrich <- perform_enrichment(ss_select_rural_nested10_anno, msigdb_cp_t2g, uni_rural, "rural", "NA")
+
+```
+Flatten
+```{r}
+all_enrich_res <- do.call(rbind, sig_genes_anno_enrich$enrich_res_list)
+
+u_enrich_res <- do.call(rbind, sig_urban_genes_anno_enrich$enrich_res_list)
+
+r_enrich_res <- do.call(rbind, sig_rural_genes_anno_enrich$enrich_res_list)
+
+
+
+all_enrich_sig <- do.call(rbind, sig_genes_anno_enrich$enrich_sig_list)
+
+u_enrich_sig <- do.call(rbind, sig_urban_genes_anno_enrich$enrich_sig_list)
+
+r_enrich_sig <- do.call(rbind, sig_rural_genes_anno_enrich$enrich_sig_list)
+```
+```{r}
+interesting_interactions <- data.frame(
+  uniprot_gn_symbol = c(
+    "SIGMAR1",
+    "MMP14",
+    "AQP3",
+    "STAT1",
+    "DDX60",
+    "IFI44",
+    "HERC6",
+    "MX2",
+    "RB1CC1",
+    "PPARGC1A",
+    "RAF1"
+  ),
+  taxa = c(
+    "Lachnospiraceae_bacterium_GAM79",
+    "Lachnospiraceae_bacterium_GAM79",
+    "Lachnospiraceae_bacterium_GAM79",
+    "Bacteroides_finegoldii",
+    "Bacteroides_finegoldii",
+    "Bacteroides_finegoldii",
+    "Bacteroides_finegoldii",
+    "Bacteroides_finegoldii",
+    "Dorea_sp",
+    "Dorea_sp",
+    "Dorea_sp"
+    )) %>%
+  dplyr::mutate(gene_taxa = paste(uniprot_gn_symbol, taxa, sep=":"))
+
+interesting_taxa <- microbes %>%
+  as.data.frame() %>%
+  dplyr::select(unique(interesting_interactions$taxa)) %>%
+  rownames_to_column("SampleID") %>%
+  pivot_longer(
+    cols = -SampleID,   # Pivot all columns except 'ensembl_gene_id'
+    names_to = "taxa",       # The column that will hold the names of the original columns (samples)
+    values_to = "abundance"   # The column that will hold the values (expression levels)
+  ) 
+
+interesting_lasso <- uni %>%
+  dplyr::filter(uniprot_gn_symbol %in% interesting_interactions$uniprot_gn_symbol) %>%
+  dplyr::filter(if_else(uniprot_gn_symbol == "H3C1", ensembl_gene_id == "ENSG00000275714", TRUE)) %>%
+  dplyr::filter(if_else(uniprot_gn_symbol == "H2BC4", ensembl_gene_id == "ENSG00000277224", TRUE))
+  
+residual_plot_df <- genes_bc %>%
+  as.data.frame() %>%
+  rownames_to_column("ensembl_gene_id") %>%
+  dplyr::filter(ensembl_gene_id %in% interesting_lasso$ensembl_gene_id) %>%
+  pivot_longer(
+    cols = -ensembl_gene_id,   # Pivot all columns except 'ensembl_gene_id'
+    names_to = "SampleID",       # The column that will hold the names of the original columns (samples)
+    values_to = "expression"   # The column that will hold the values (expression levels)
+  ) %>%
+  merge(meta[c("SampleID", "urbanism")], by="SampleID") %>%
+  merge(interesting_lasso[c("uniprot_gn_symbol", "ensembl_gene_id")], by="ensembl_gene_id") %>%
+  merge(interesting_interactions[c("uniprot_gn_symbol", "taxa", "gene_taxa")], by="uniprot_gn_symbol") %>%
+  merge(interesting_taxa[c("taxa", "abundance", "SampleID")], by=c("taxa", "SampleID"))
+
+residual_plot_list <- split(residual_plot_df, residual_plot_df$gene_taxa)
+```
+```{r}
+custom_breaks <- function(x) {
+  pretty(x, n = 3)
+}
+
+ggplot(residual_plot_df, aes(x=expression, y=abundance, color=urbanism)) +
+  geom_point(alpha=0.6, size=1) +
+  scale_color_manual(values=c("#6FBD8B", "#7B2BC1")) +
+  geom_smooth(method = "lm", se = FALSE, color = "#0077b6") +
+  facet_wrap(~ gene_taxa + urbanism, ncol=2, scales="free_x") +
+  theme_linedraw() +
+  theme(
+    legend.position = "none",      # Remove the legend
+    strip.background = element_blank(),  # Remove facet strip background
+    strip.text = element_blank(),  # Remove facet strip text
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_x_continuous(breaks = function(x) custom_breaks(x)) +
+  scale_y_continuous(breaks = function(y) custom_breaks(y)) +
+  xlab(NULL) +                     # Remove x-axis title
+  ylab(NULL)
+ggsave("results/figs/RNAseq-metaG-microbe-Lasso/lasso_residuals.png", width=2, height=13)
+#ggsave("results/figs/RNAseq-metaG-microbe-Lasso/lasso_residuals_LABS.png", width=5, height=20)
+```
+```{r}
+11 * 1.5
+```
+
+
+

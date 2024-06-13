@@ -25,126 +25,108 @@ meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
   dplyr::filter(!SampleID %in% c("GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
   # USA samples have no metadata
   dplyr::filter(!country == "USA")
-row.names(meta) <- meta$SampleID
+row.names(meta) <- meta$SampleName
 meta <- meta[order(row.names(meta)), ]
 
 ```
+Load microbe abundances
+```{r}
+clr_filt_microbe_abundances <- read.csv("results/docs/clr_filt_microbe_abundances.csv", row.names = 1)
+clr_filt_microbe_abundances <- clr_filt_microbe_abundances[order(row.names(clr_filt_microbe_abundances)), ]
+```
+
 Here are some of the interesting lifestyle variables (measured in stool with the exception of PC which is mostly surveys):
 - PC1_uw, PC2_uw, PC1_w, PC2_w: I think this means weighted and unweighted PC values based on host lifestyle
 - calpro: calprotectin stool test. High levels of calprotectin = inflammation of intestines
 - chromogranin: protein associated with tumors and other disease conditions
 - igm and iga: antibodies secreted in response to infection
 
-Let's just see what this looks like, divided among country and urbanism.
+Microbes of interest from Figure 3
 ```{r}
-test <- meta %>%
-  dplyr::select(c(SampleID, urbanism, country, PC1_uw, PC2_uw, PC1_w, PC2_w, calpro, chromogranin, igm, iga)) %>%
-  mutate_at(vars(-SampleID, -urbanism, -country), as.numeric)
-
-p_PC1_uw <- ggplot(test, aes(y= "PC1_uw", x = SampleID, fill = PC1_uw)) +
-  geom_tile(color = "white") +
-  facet_grid(~urbanism , scales = "free", space = "free") +
-  scale_fill_gradient(name = "", low = "white", high = "steelblue") +
-  theme_minimal() +
-  theme(axis.text.x = element_blank(),     # Remove x-axis labels
-        axis.title.y = element_blank(),    # Remove y-axis title
-        axis.title.x = element_blank(),    # Remove x-axis title
-        strip.background = element_rect(fill = "grey"), 
-        legend.direction = "horizontal",  # Horizontal legend
-        legend.position = "right")       # Legend position
-
-p_PC2_uw <- ggplot(test, aes(y= "PC2_uw", x = SampleID, fill = PC2_uw)) +
-  geom_tile(color = "white") +
-  facet_grid(~urbanism , scales = "free", space = "free") +
-  scale_fill_gradient(name = "", low = "white", high = "skyblue") +
-  theme_minimal() +
-  theme(axis.text.x = element_blank(),     # Remove x-axis labels
-        axis.title.y = element_blank(),    # Remove y-axis title
-        axis.title.x = element_blank(),    # Remove x-axis title
-        strip.text = element_blank(),     # Remove facet labels
-        strip.background = element_blank(), # Remove facet strip background
-        legend.direction = "horizontal",  # Horizontal legend
-        legend.position = "right")       # Legend position
-
-p_PC1_w <- ggplot(test, aes(y= "PC1_w", x = SampleID, fill = PC1_w)) +
-  geom_tile(color = "white") +
-  facet_grid(~urbanism , scales = "free", space = "free") +
-  scale_fill_gradient(name = "", low = "white", high = "turquoise4") +
-  theme_minimal() +
-  theme(axis.text.x = element_blank(),     # Remove x-axis labels
-        axis.title.y = element_blank(),    # Remove y-axis title
-        axis.title.x = element_blank(),    # Remove x-axis title
-        strip.text = element_blank(),     # Remove facet labels
-        strip.background = element_blank(), # Remove facet strip background
-        legend.direction = "horizontal",  # Horizontal legend
-        legend.position = "right")       # Legend position
-
-p_PC2_w <- ggplot(test, aes(y= "PC2_w", x = SampleID, fill = PC2_w)) +
-  geom_tile(color = "white") +
-  facet_grid(~urbanism , scales = "free", space = "free") +
-  scale_fill_gradient(name = "", low = "white", high = "turquoise") +
-  theme_minimal() +
-  theme(axis.text.x = element_blank(),     # Remove x-axis labels
-        axis.title.y = element_blank(),    # Remove y-axis title
-        axis.title.x = element_blank(),    # Remove x-axis title
-        strip.text = element_blank(),     # Remove facet labels
-        strip.background = element_blank(), # Remove facet strip background
-        legend.direction = "horizontal",  # Horizontal legend
-        legend.position = "right")       # Legend position
-
-p_calpro <- ggplot(test, aes(y= "calpro", x = SampleID, fill = calpro)) +
-  geom_tile(color = "white") +
-  facet_grid(~urbanism , scales = "free", space = "free") +
-  scale_fill_gradient(name = "", low = "white", high = "violetred3") +
-  theme_minimal() +
-  theme(axis.text.x = element_blank(),     # Remove x-axis labels
-        axis.title.y = element_blank(),    # Remove y-axis title
-        axis.title.x = element_blank(),    # Remove x-axis title
-        strip.text = element_blank(),     # Remove facet labels
-        strip.background = element_blank(), # Remove facet strip background
-        legend.direction = "horizontal",  # Horizontal legend
-        legend.position = "right")       # Legend position
-
-p_igm <- ggplot(test, aes(y= "igm", x = SampleID, fill = igm)) +
-  geom_tile(color = "white") +
-  facet_grid(~urbanism , scales = "free", space = "free") +
-  scale_fill_gradient(name = "", low = "white", high = "green4") +
-  theme_minimal() +
-  theme(axis.text.x = element_blank(),     # Remove x-axis labels
-        axis.title.y = element_blank(),    # Remove y-axis title
-        axis.title.x = element_blank(),    # Remove x-axis title
-        strip.text = element_blank(),     # Remove facet labels
-        strip.background = element_blank(), # Remove facet strip background
-        legend.direction = "horizontal",  # Horizontal legend
-        legend.position = "right")       # Legend position
-
-p_iga <- ggplot(test, aes(y= "iga", x = SampleID, fill = iga)) +
-  geom_tile(color = "white") +
-  facet_grid(~urbanism , scales = "free", space = "free") +
-  scale_fill_gradient(name = "", low = "white", high = "darkolivegreen2") +
-  theme_minimal() +
-  theme(axis.text.x = element_blank(),     # Remove x-axis labels
-        axis.title.x = element_blank(),    # Remove x-axis title
-        strip.text = element_blank(),     # Remove facet labels
-        strip.background = element_blank(), # Remove facet strip background
-        legend.direction = "horizontal",  # Horizontal legend
-        legend.position = "right")       # Legend position
-
-library(ggpubr)
-ggarrange(p_PC1_uw, 
-          p_PC2_uw,
-          p_PC1_w,
-          p_PC2_w,
-          p_calpro,
-          p_igm,
-          p_iga,
-          ncol=1, align = "v", heights = c(1, 1, 1, 1, 1, 1, 1))
-ggsave("results/figs/testheatmap_deletelater.png")
-```
-From eyeballing this it looks like we're going to get the most results by testing PC1_uw or PC1_w.
-
-```{r}
+microbes_select <- clr_filt_microbe_abundances %>%
+  rownames_to_column("SampleName") %>%
+  dplyr::filter(SampleName %in% meta$SampleName) %>%
+  column_to_rownames("SampleName") %>%
+  select(c("Spirochaetes", "Spirochaetaceae", "Treponema",
+                     "Clostridia", "Clostridiales", "Lachnospiraceae",
+                     "Barnesiellaceae", "Odoribacter",
+                     "Bacteroidia", "Bacteroidales",
+                     "Lachnospira_eligens", "Eubacterium_sp_1",
+                     "Faecalibacterium","Faecalibacterium_sp_3"))
 
 ```
 
+```{r}
+# Get the feature columns from meta_select (e.g., PC1_uw and 4 other features)
+features <- c("PC1_uw", "calpro", "chromogranin", "igm", "iga",
+              "water_source", "c_section", "breast_fed", "household_size", "animal_contact", "tobacco", "exercice_per_week")
+
+meta_select <- meta %>%
+  select(features) %>%
+  mutate_all(~as.numeric(str_extract(.x, "\\d+\\.?\\d*")))  # Extract numeric values from each column
+
+# Initialize a results list to store correlation coefficients and p-values
+results <- list(correlations = matrix(nrow = ncol(microbes_select), ncol = length(features)),
+                p_values = matrix(nrow = ncol(microbes_select), ncol = length(features)))
+
+# Loop through each microbe column and each feature to calculate correlation
+for (i in 1:ncol(microbes_select)) {
+  microbe_data <- microbes_select[, i]
+  for (j in 1:length(features)) {
+    feature_data <- as.numeric(meta_select[[features[j]]])
+    cor_test <- cor.test(microbe_data, feature_data)
+    results$correlations[i, j] <- cor_test$estimate
+    results$p_values[i, j] <- cor_test$p.value
+  }
+}
+
+# Adjust p-values for multiple testing using Benjamini-Hochberg procedure
+# Flatten the p_values matrix to a vector for adjustment
+adjusted_p_values <- p.adjust(as.vector(results$p_values), method = "BH")
+
+# Reshape the adjusted p-values back to the original matrix shape
+adjusted_p_values <- matrix(adjusted_p_values, nrow = ncol(microbes_select), ncol = length(features))
+
+# Convert the results to a dataframe for better readability
+correlation_results <- data.frame(
+  Microbe = rep(colnames(microbes_select), times = length(features)),
+  Feature = rep(features, each = ncol(microbes_select)),
+  Correlation = as.vector(results$correlations),
+  P_Value = as.vector(results$p_values),
+  Adjusted_P_Value = as.vector(adjusted_p_values)
+)
+```
+```{r}
+correlation_results_sig <- correlation_results %>%
+  filter(P_Value < 0.05)
+```
+```{r}
+correlation_results <- correlation_results %>%
+  mutate(Log10_P_Value = -log10(P_Value)) %>%
+  mutate(Log10_P_Value_plot = ifelse(P_Value < 0.05, Log10_P_Value, NA)) %>%
+  mutate(component = case_when(Microbe %in% c("Faecalibacterium","Faecalibacterium_sp_3") ~"1a",
+                               Microbe %in% c("Bacteroidia", "Bacteroidales") ~ "1b/3b",
+                               Microbe %in% c("Spirochaetes", "Spirochaetaceae", "Treponema") ~ "2a",
+                               Microbe %in% c("Clostridia", "Clostridiales", "Lachnospiraceae") ~ "2b",
+                               Microbe %in% c("Barnesiellaceae", "Odoribacter") ~ "3a",
+                               Microbe %in% c("Lachnospira_eligens", "Eubacterium_sp_1") ~ "3c"))
+                            
+
+# Plot using ggplot2
+ggplot(correlation_results, aes(x = Microbe, y = Feature, fill = Correlation)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "#4cc9f0", mid = "white", high = "#f26419", midpoint = 0) +
+  geom_point(aes(size = Log10_P_Value_plot), shape = 21, color = "black", fill = "black") +
+  scale_size_continuous(range = c(1, 10)) +  # Adjust range as needed
+  theme_linedraw() +
+  facet_grid(~component, scales="free")+
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black"),  # Angle and color x-axis text
+    axis.text.y = element_text(size = 10, color = "black"),  # Color y-axis text
+    strip.background = element_blank(),  # Remove facet panel background
+    strip.text = element_text(color = "black"),  # Make facet panel text black
+    panel.border = element_blank()  # Remove panel border
+  ) + 
+  labs(fill = "Correlation", size = "-log10(P-Value)") 
+```
 

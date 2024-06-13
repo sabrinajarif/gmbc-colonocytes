@@ -97,9 +97,46 @@ meta <- GMCC_covariates_all_batches %>%
     country == "Rwanda" ~ "data/metaG-QC/flags/rwanda.svg",
     country == "USA" ~ "data/metaG-QC/flags/usa.svg")) 
 ```
+Impute some missing values for USA samples
+
+```{r}
+### I GET THIS INFORMATION FURTHER DOWNSTREAM IN THIS MARKDOWN DOC
+### USING FIRST 5 PCs TO INFER AGE AND SEX OF USA SAMPLES
+### I KNOW THIS ISN'T A PERFECT SOLUTION SINCE WE ARE CORRECTING FOR THESE VARS
+### BUT I DON'T THINK THEY WILL BE EXTREMELY IMPORTANT 
+
+#meta_imputation <- genus_clr_dist_vectors %>%
+#  as.data.frame() %>%
+#  dplyr::select(1:5) %>%
+#  rownames_to_column("SampleName") %>%
+#  merge(meta[,c("SampleName", "age", "sex")], by="SampleName") %>%
+#  mutate(age = if_else(age == "unknown", NA_character_, age)) %>%
+#  mutate(sex = if_else(sex == "unknown", NA_character_, sex)) %>%
+#  column_to_rownames("SampleName")
+
+#library(VIM)
+
+# Impute missing values using KNN imputation
+#imputed_data <- kNN(meta_imputation, k = 5)
+#rownames(imputed_data) <- rownames(meta_imputation)
+```
+Update metadata
+```{r}
+imputed_samples <- data.frame(
+  SampleName = c("FMG110", "FMG111", "FMG112", "FMG28", "FMG65"),
+  age = c(29,59,39,29,39),
+  sex= c("F","M","F","M","M")
+)
+ 
+meta$age[meta$SampleName %in% imputed_samples$SampleName] <- imputed_samples$age
+meta$age <- as.numeric(meta$age)
+meta$sex[meta$SampleName %in% imputed_samples$SampleName] <- imputed_samples$sex
+```
+
+
 Convert to phyloseq format
 ```{r}
- abun_phy <- bracken_species_combined_num %>%
+abun_phy <- bracken_species_combined_num %>%
     # Prune abundance table of samples missing from metadata
     dplyr::select(!all_of(remove_from_abun)) %>%
     as.matrix() %>%
@@ -229,6 +266,7 @@ nrow(tax_table(phy_filt_s)) +
 ```
 
 
+
 ALDEx2 for differential abundance testing. We will filter these a few steps later. Negative effect size indicates the microbe is primarily found in rural, positive effect size means urban.
 
 Explanation of output:
@@ -253,12 +291,8 @@ I believe the order of operations within aldex is this:
 ```{r}
 ## Functions
 
-# Run aldex2 for differential abundance. uses clr
-#aldex2_func <- function(phy) {
-#  ALDEx2::aldex(as.data.frame(phyloseq::otu_table(phy)), phyloseq::sample_data(phy)$urbanism, test="t", effect = TRUE, denom="iqlr", include.sample.summary=T) }
-
 aldex2_func <- function(phy) {
-  ALDEx2::aldex.clr(as.data.frame(phyloseq::otu_table(phy)), 
+  ALDEx2::aldex.clr(as.data.frame(phyloseq::otu_table(phy)),
                     phyloseq::sample_data(phy)$urbanism, 
                     mc.samples=128, 
                     denom="all", 
@@ -280,6 +314,33 @@ aldex2_cts <- function(aldex_obj){
   row_means_df <- dplyr::bind_cols(row_means_list)
   return(row_means_df)
 }
+
+#aldex2_cts <- function(aldex_obj){
+#  x.counts_obj <- getMonteCarloInstances(aldex_obj)
+#  x.counts <- as.data.frame(x.counts_obj$reads) 
+#  return(x.counts)
+#}
+```
+```{r}
+covariates <- phyloseq::sample_data(phy_filt_g) %>%
+  data.frame() %>%
+  dplyr::select(urbanism, country)
+mm <- model.matrix(~ urbanism, covariates)
+x.glm <- aldex.clr(as.data.frame(otu_table(phy_filt_g)), mm, mc.samples=128, denom="all", verbose=T)
+glm.test <- aldex.glm(x.glm, mm)
+glm.eff<- aldex.glm.effect(x.glm)
+```
+
+More functions
+```{r}
+aldex2_test <- function(phy) {
+  ALDEx2::aldex.clr(as.data.frame(phyloseq::otu_table(phy)), 
+                    phyloseq::sample_data(phy)$urbanism, 
+                    mc.samples=128, 
+                    denom="all", 
+                    verbose=F,
+                    useMC=T) }
+
 
 aldex2_res <- function(aldex_obj) {
   x <- aldex_obj
@@ -308,46 +369,17 @@ aldex2_plot <- function(aldex_result) {
 
 ```
 
-JUST TO VISUALLY DEMONSTRATE
-```{r}
-# run aldex2 using clr transformation
-x <- ALDEx2::aldex.clr(as.data.frame(phyloseq::otu_table(phy_filt_p)), 
-                    phyloseq::sample_data(phy)$urbanism, 
-                    mc.samples=128, 
-                    denom="all", 
-                    verbose=F,
-                    useMC=T)
-
-# MC instances
-x.counts <- getMonteCarloInstances(x)
-head(x.counts[1])
-
-# Calculate row means for each nested list
-row_means_list <- lapply(x.counts, function(i) {data.frame(rowMeans(i))})
-
-# Replace column names with sample names
-row_means_list <- lapply(names(row_means_list), function(list_name) {
-    df <- row_means_list[[list_name]]
-    colnames(df) <- list_name
-    return(df)})
-head(row_means_list[1])
-
-# Convert the list of row means into a data frame and CLR transform
-row_means_df <- dplyr::bind_cols(row_means_list)
-head(row_means_df)
-```
-
 
 ```{r}
 ## Apply 
 
 # Create aldex2 object
-aldex2_clr_s <- aldex2_func(phy_filt_s)
-aldex2_clr_g <- aldex2_func(phy_filt_g)
-aldex2_clr_f <- aldex2_func(phy_filt_f)
-aldex2_clr_o <- aldex2_func(phy_filt_o)
-aldex2_clr_c <- aldex2_func(phy_filt_c)
-aldex2_clr_p <- aldex2_func(phy_filt_p)
+aldex2_clr_s <- aldex2_test(phy_filt_s)
+aldex2_clr_g <- aldex2_test(phy_filt_g)
+aldex2_clr_f <- aldex2_test(phy_filt_f)
+aldex2_clr_o <- aldex2_test(phy_filt_o)
+aldex2_clr_c <- aldex2_test(phy_filt_c)
+aldex2_clr_p <- aldex2_test(phy_filt_p)
 
 # Extract CLR-normalized counts
 aldex2_clr_s_cts <- aldex2_cts(aldex2_clr_s)
@@ -432,6 +464,12 @@ paste("ALDEx2 significant OTUs:",nrow(aldex2_clr_all_sig))
 Make a list of the microbes we will look at downstream (if differentially abundant)
 ```{r}
 # Combine significant results
+#clr_filt <- rbind(aldex2_clr_p_cts, aldex2_clr_c_cts) %>%
+#  rbind(aldex2_clr_o_cts) %>%
+#  rbind(aldex2_clr_f_cts) %>%
+#  rbind(aldex2_clr_g_cts) %>%
+#  rbind(aldex2_clr_s_cts) 
+
 clr_filt <- rbind(aldex2_clr_p_cts, aldex2_clr_c_cts) %>%
   rbind(aldex2_clr_o_cts) %>%
   rbind(aldex2_clr_f_cts) %>%
@@ -456,58 +494,101 @@ clr_filt_DA_microbe_abundances <- clr_filt_DA %>%
   t() %>%
   data.frame()
 
-write.csv(clr_filt_DA_microbe_abundances, "results/docs/clr_filt_DA_microbe_abundances.csv")
+#write.csv(clr_filt_DA_microbe_abundances, "results/docs/clr_filt_DA_microbe_abundances.csv")
 ```
 
-
-
-
-Just for comparison, lets also do a clr transformation of the phyloseq data
 ```{r}
-phy_clr <- function(phy){
-  microbiome::transform(phy, "clr")
-}
+test <- clr_filt_microbe_abundances %>%
+  dplyr::select(Faecalibacterium,
+                     Faecalibacterium_sp_3,
+                     Bacteroides_ovatus,
+                     Bacteroides_caccae,
+                     Clostridiales,
+                     Lachnospiraceae,
+                     Spirochaetaceae,
+                     Treponema,
+                     Flavobacteriia,
+                     Flavobacteriaceae,
+                     Clostridiaceae,
+                     Clostridium,
+                     Akkermansiaceae,
+                     Akkermansia,
+                     Clostridiaceae,
+                     Clostridium,
+                     Erysipelotrichia,
+                     Erysipelotrichales,
+                     Enterobacter,
+                     Klebsiella,
+                     Anaerobutyricum,
+                     Klebsiella_pneumoniae,
+                     Veillonellaceae,
+                     Dialister_sp,
+                     Coprococcus,
+                     Coprococcus_sp,
+                     Lachnospiraceae_bacterium_GAM79,
+                     Bacteroides_finegoldii
+                ) %>%
+  rownames_to_column("SampleName") %>%
+  pivot_longer(cols = -SampleName, names_to = "OTU", values_to = "CLR_abundance") %>%
+  merge(meta[,c("SampleName", "urbanism")], by="SampleName")
 
-phy_clr_cts <- function(phy){
-  cts <- as.data.frame(otu_table(phy))
-}
+ggplot(filter(test, OTU=="Bacteroides_finegoldii"), aes(x=urbanism, y=CLR_abundance, fill=urbanism)) +
+  geom_boxplot() +
+  scale_fill_manual(values=c("#6FBD8B", "#7B2BC1")) + 
+  theme_linedraw() + 
+  theme_linedraw() +
+  labs(x = "Bacteroides finegoldii", y = NULL) +  # Remove x and y axis titles
+  theme(
+    legend.position = "none",  # Remove the legend
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    text = element_text(size = 12),
+    axis.title.x = element_text(face = 'italic')
+  )
+ggsave("results/figs/RNAseq-metaG-microbe-SparseCCA/Bacteroides_finegoldii.png", width=2, height=1.5)
 
-# transform
-phy_clr_s <- phy_clr(phy_filt_s)
-phy_clr_g <- phy_clr(phy_filt_g)
-phy_clr_f <- phy_clr(phy_filt_f)
-phy_clr_o <- phy_clr(phy_filt_o)
-phy_clr_c <- phy_clr(phy_filt_c)
-phy_clr_p <- phy_clr(phy_filt_p)
-
-# counts matrix
-phy_clr_s_cts <- phy_clr_cts(phy_clr_s)
-phy_clr_g_cts <- phy_clr_cts(phy_clr_g)
-phy_clr_f_cts <- phy_clr_cts(phy_clr_f)
-phy_clr_o_cts <- phy_clr_cts(phy_clr_o)
-phy_clr_c_cts <- phy_clr_cts(phy_clr_c)
-phy_clr_p_cts <- phy_clr_cts(phy_clr_p)
-
-DA_microbe_abundances_phyclr <- rbind(phy_clr_s_cts, phy_clr_g_cts) %>%
-  rbind(phy_clr_f_cts) %>%
-  rbind(phy_clr_o_cts) %>%
-  rbind(phy_clr_c_cts) %>%
-  rbind(phy_clr_p_cts) %>%
-  t() %>%
-  data.frame %>%
-  dplyr::select(row.names(aldex2_clr_all_sig)) 
-
-write.csv(DA_microbe_abundances_phyclr, "results/docs/DA_microbe_abundances_phyclr.csv")
 ```
-Compare these two methods visually
-Transformation of the phyloseq data (not via aldex2) produces greater contrast, but overall they look very similar
 ```{r}
-heatmap(as.matrix(DA_microbe_abundances))
-heatmap(as.matrix(DA_microbe_abundances_phyclr))
-heatmap(as.matrix(DA_microbe_abundances), Rowv = NA, Colv = NA)
-heatmap(as.matrix(DA_microbe_abundances_phyclr), Rowv = NA, Colv = NA)
-```
+target_colnames <- c("Faecalibacterium",
+                     "Faecalibacterium_sp_3",
+                     "Bacteroides_ovatus",
+                     "Bacteroides_caccae",
+                     "Clostridiales",
+                     "Lachnospiraceae",
+                     "Spirochaetaceae",
+                     "Treponema",
+                     "Flavobacteriia",
+                     "Flavobacteriaceae",
+                     "Clostridiaceae",
+                     "Clostridium",
+                     "Akkermansiaceae",
+                     "Akkermansia",
+                     "Clostridiaceae",
+                     "Clostridium",
+                     "Erysipelotrichia",
+                     "Erysipelotrichales",
+                     "Enterobacter",
+                     "Klebsiella",
+                     "Anaerobutyricum",
+                     "Klebsiella_pneumoniae",
+                     "Veillonellaceae",
+                     "Dialister_sp",
+                     "Coprococcus",
+                     "Coprococcus_sp",
+                     "Unknown_genus_65",
+                     "Lachnospiraceae_bacterium_GAM79",
+                     "Bacteroides_finegoldii",
+                     "Dorea_sp",
+                     "Unknown_genus_15")
+          
 
+# Get the column names of your data frame
+df_colnames <- colnames(clr_filt_DA_microbe_abundances)
+
+# Find the intersection of the data frame's column names and your list
+matching_colnames <- intersect(df_colnames, target_colnames)
+matching_colnames
+```
 
 
 Post-filt distance matrix: species-level
@@ -558,6 +639,46 @@ species_clr_dist_urbanism <- ggplot(species_clr_dist_select, aes(x=Axis.1, y=urb
 ggarrange(species_clr_dist_pcoa, species_clr_dist_urbanism, ncol=1, align = "v", heights=c(0.7, 0.3))
 #ggsave("results/figs/metaG-PCoA/species.png", width=5, height=4)
 ```
+Corrleation of PC vectors to metadata
+```{r}
+total_reads <- as.data.frame((colSums(bracken_species_combined_num))) %>%
+  dplyr::rename("total_reads" = 1) %>%
+  rownames_to_column("SampleName")
+
+meta_correct <- meta %>% 
+  dplyr::select(country, sex, age) %>%
+  rownames_to_column("SampleName") %>%
+  left_join(total_reads, by="SampleName") %>%
+  dplyr::filter(SampleName %in% row.names(species_clr_dist_vectors)) %>%
+  dplyr::filter(!country == "USA") %>%
+  column_to_rownames("SampleName")
+
+species_clr_dist_vectors2 <- species_clr_dist_vectors[!grepl("^FMG", rownames(species_clr_dist_vectors)), , drop = FALSE]
+species_clr_dist_vectors2 <- species_clr_dist_vectors2[,1:15]
+
+meta_correct <- meta_correct[rownames(species_clr_dist_vectors2),]
+meta_correct <- as.matrix(meta_correct)
+
+# Recode categorical vars
+meta_correct[,"country"] <- as.numeric(factor(meta_correct[,"country"]))
+meta_correct[,"sex"] <- as.numeric(factor(meta_correct[,"sex"]))
+
+# Assuming your matrix is called "my_matrix"
+meta_correct2 <- apply(meta_correct, 2, as.numeric)
+rownames(meta_correct2) <-rownames(meta_correct)
+species_clr_dist_vectors3 <- apply(species_clr_dist_vectors2, 2, as.numeric)
+rownames(species_clr_dist_vectors3) <-rownames(species_clr_dist_vectors2)
+
+meta_cor <- cor(meta_correct2, species_clr_dist_vectors3)
+
+library(RColorBrewer)
+heatmap(meta_cor, Colv = NA, 
+        col= colorRampPalette(brewer.pal(8, "Oranges"))(25))
+legend(x="top", legend=c("min", "ave", "max"), 
+     fill=colorRampPalette(brewer.pal(8, "Oranges"))(3))
+```
+
+
 Post-filt distance matrix: genus-level
 ```{r}
 # Distance matrix
@@ -594,7 +715,7 @@ genus_clr_dist_pcoa <- plot_ordination(phy_clr_filt_g, genus_clr_dist, type="sam
 genus_clr_dist_urbanism <- ggplot(genus_clr_dist_select, aes(x=Axis.1, y=urbanism, fill=urbanism)) +
   geom_boxplot(alpha=0.65, outlier.size = 2.5) +
   scale_fill_manual(values=c("#6FBD8B", "#7B2BC1"), name = "Population") + #F42585
-  theme_linedraw() #+
+  theme_linedraw() 
   #xlab("PC1: 23.3%") +
   #theme(axis.title.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank())
 
@@ -677,62 +798,6 @@ g_plot
 #ggsave("results/figs/metaG-stackedbar/genus.png", width=6.5, height=4)
 ```
 
-```{r}
-g_plot_df2 <- phy_r_filt_g %>%
-  psmelt() %>%
-  dplyr::select(g, Abundance) %>%
-  group_by(g) %>%
-  summarize(median = median(Abundance)) %>%
-  left_join(psmelt(phy_r_filt_g), by = "g") %>%
-  # Set threshold for "Other" coloring
-  mutate(Genus = case_when(median < 0.005 ~ paste0('zOther (', 0.005*100, '% or less)'),
-                             .default =g)) %>%
-  mutate(SampleName = as.factor(SampleName))
-
-s_res_ggplot <- aldex2_clr_s_res %>%
-  rownames_to_column("s") %>%
-  arrange(effect) %>%
-  mutate(sig = case_when(((wi.eBH < 0.005) & (effect > 0.8)) | ((wi.eBH < 0.005) & (effect < 0.8)) ~ "sig",
-                         FALSE ~ "ns")) %>%
-  merge(taxonomy_sep_select[,c("s","g")], by="s") %>%
-  merge(g_plot_df2[,c("g","Genus")], by="g")
-
-species_of_interest <- c("Bacteroides_vulgatus", "Alistipes_putredinis", "Faecalibacterium_sp")
-
-s_res_ggplot <- s_res_ggplot %>%
-  mutate(name = case_when(s %in% species_of_interest ~ s,
-                          FALSE ~ "")) %>%
-  mutate(name = str_replace_all(name, "_", " ")) %>%
-  mutate(shape = case_when(is.na(name) ~ "shape1",
-                           TRUE ~ "shape2"))
-```
-```{r}
-ggplot(s_res_ggplot, aes(x=effect, y=-log10(wi.eBH), label=name)) +
-  geom_point(aes(color=Genus), size=2) +
-  geom_text(fontface = "italic", hjust =1.05) +
-  xlab("Effect size") +
-  ylab("Significance [-log10(q)]") +
-  xlim(values=c(-1.2,1.2)) +
-  geom_hline(yintercept = -log10(0.005), linetype = "dashed", color = "gray") +
-  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "gray") +
-  scale_color_manual(values=c(
-    "#e2711d", # Bacteroides
-    "#ff9100", # Blautia
-    "#ffaa00", # Clostridium
-    "#fee231", # Coprococcus
-    "#eeef20", # Dorea
-    "#c2cd4b", # Eubacterium
-    "#84ba63", # Faecalibacterium
-    "#4aa77c", # Oscillibacter
-    "#28947f", # Parabacteroides
-    "#2f94c6", # Prevotella
-    "#277ba5", # Roseburia
-    "#1f6284", # Ruminococcus
-    "darkgrey"# Other
-  )) +
-  theme_linedraw()
-ggsave("results/figs/volcano_f31.png", width=6, height=4)
-```
 
 
 

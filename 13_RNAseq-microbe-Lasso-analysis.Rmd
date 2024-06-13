@@ -1,0 +1,20 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+```
+
+Actual lasso analysis is performed on midway.
+
+Read in results
+```{r}
+lasso_all <- read.table("results/docs/lasso/lasso_hdi_all.txt")
+lasso_urban <- read.table("results/docs/lasso/lasso_hdi_all.txt")
+lasso_rural <- read.table("results/docs/lasso/lasso_hdi_all.txt") 
+```
+
+

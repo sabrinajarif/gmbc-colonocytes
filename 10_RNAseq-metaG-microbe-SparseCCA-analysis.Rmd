@@ -11,61 +11,129 @@ library(clusterProfiler)
 library(ReactomePA)
 ```
 
+
+
 Read in info from last notebook
 ```{r}
-CCA_microbe_elements <- readRDS("results/rds/CCA_microbe_elements.rds")
+CCA_microbe_elements <- readRDS("results/rds/CCA_microbe_elements_all.rds")
+genes = CCA_microbe_elements[["genes"]]
 genes_urban = CCA_microbe_elements[["genes_urban"]]
 genes_rural = CCA_microbe_elements[["genes_rural"]]
+sig_df = CCA_microbe_elements[["sig_all_df"]]
 sig_urban_df = CCA_microbe_elements[["sig_urban_df"]]
 sig_rural_df = CCA_microbe_elements[["sig_rural_df"]]
+sig_microbes = CCA_microbe_elements[["sig_all_microbes"]]
 sig_urban_microbes = CCA_microbe_elements[["sig_urban_microbes"]]
 sig_rural_microbes = CCA_microbe_elements[["sig_rural_microbes"]]
+sig_genes = CCA_microbe_elements[["sig_all_genes"]]
 sig_urban_genes = CCA_microbe_elements[["sig_urban_genes"]]
 sig_rural_genes = CCA_microbe_elements[["sig_rural_genes"]]
 ```
-
-TEMPORARY FIG FOR SLIDES
+Check if microbe coefficients are of the same direction
 ```{r}
-example <- sig_rural_df$component_9 
+# do all microbes have the same directionality?
+check_directionality <- function(df) {
+  # Remove NA values
+  coeffs <- df$taxa_coeff[!is.na(df$taxa_coeff)]
+  
+  # Check if all are positive, all negative, or mixed
+  if (all(coeffs > 0)) {
+    return("all positive")
+  } else if (all(coeffs < 0)) {
+    return("all negative")
+  } else {
+    return("DIFFERENT")
+  }
+}
 
-test = annotate_ensembl(sig_rural_genes$component_9)
 
-example2 <- example %>%
-  mutate(ensembl_gene_id = gene) %>%
-  merge(test, by="ensembl_gene_id") %>%
-  mutate(gene_coeff = as.numeric(gene_coeff)) %>%
-  arrange(desc(gene_coeff)) %>%
-  slice(1:10) %>%
-  mutate(filler="filler")
-example2$uniprot_gn_symbol <- factor(example2$uniprot_gn_symbol, levels=unique(example2$uniprot_gn_symbol))
+for (i in names(sig_df)) {
+  result <- check_directionality(sig_df[[i]])
+  cat(paste("All samples: ", i, "is", result, "\n"))
+}
+for (i in names(sig_urban_df)) {
+  result <- check_directionality(sig_urban_df[[i]])
+  cat(paste("Urban samples: ", i, "is", result, "\n"))
+}
+for (i in names(sig_rural_df)) {
+  result <- check_directionality(sig_rural_df[[i]])
+  cat(paste("Rural samples : ", i, "is", result, "\n"))
+}
+```
+There are some cases where the microbes have coefficients in opposite directions. I may just have to make a mental note of these and come back to them when plotting. For the rest though, lets indicate if a gene has the same or opposite direction as the (majority) of taxa
+```{r}
+# Function to determine directionality of gene_coeff compared to the majority of taxa_coeff
+determine_cor_dir <- function(df) {
+  # Remove NA values from taxa_coeff
+  taxa_coeffs <- df$taxa_coeff[!is.na(df$taxa_coeff)]
+  
+  # Determine the majority direction of taxa_coeffs
+  majority_positive <- sum(taxa_coeffs > 0) > sum(taxa_coeffs < 0)
+  
+  # Initialize cor_dir column
+  df$cor_dir <- "neg"  # default to "neg"
+  
+  # Determine direction of each gene_coeff
+  for (i in 1:nrow(df)) {
+    if (!is.na(df$gene_coeff[i])) {
+      if ((majority_positive && df$gene_coeff[i] > 0) || (!majority_positive && df$gene_coeff[i] < 0)) {
+        df$cor_dir[i] <- "pos"
+      }
+    }
+  }
+  
+  return(df)
+}
+```
+Apply
+```{r}
+sig_df_dir <- lapply(sig_df, determine_cor_dir)
+sig_urban_df_dir <- lapply(sig_urban_df, determine_cor_dir)
+sig_rural_df_dir <- lapply(sig_rural_df, determine_cor_dir)
 
-ggplot(example2, aes(x=filler, y=uniprot_gn_symbol, fill=gene_coeff)) +
-  scale_fill_gradient(low = "lightskyblue1", high = "deepskyblue") +
-  scale_y_discrete(limits = rev(levels(example2$uniprot_gn_symbol))) +
-  geom_tile() +
-  theme_linedraw()
-#ggsave("DELETELATER.png", width=4, height=3)
+head(sig_df_dir[[1]])
+```
+Split into pos and neg correlations
+```{r}
+sig_df_dir_pos <- lapply(sig_df_dir, function(df) {df %>% filter(cor_dir == "pos")})
+sig_df_dir_neg <- lapply(sig_df_dir, function(df) {df %>% filter(cor_dir == "neg")})
+sig_urban_df_dir_pos <- lapply(sig_urban_df_dir, function(df) {df %>% filter(cor_dir == "pos")})
+sig_urban_df_dir_neg <- lapply(sig_urban_df_dir, function(df) {df %>% filter(cor_dir == "neg")})
+sig_rural_df_dir_pos <- lapply(sig_rural_df_dir, function(df) {df %>% filter(cor_dir == "pos")})
+sig_rural_df_dir_neg <- lapply(sig_rural_df_dir, function(df) {df %>% filter(cor_dir == "neg")})
 
-example3 <- example %>%
-  filter(!is.na(taxa_coeff)) %>%
-  mutate(taxa_coeff = as.numeric(taxa_coeff)) %>%
-  mutate(filler="filler") %>%
-  arrange(desc(taxa_coeff)) 
-example3$taxa <- factor(example3$taxa, levels=unique(example3$taxa))
+filter_genes_by_cor_dir <- function(genes_list, dir_df_list) {
+  lapply(seq_along(genes_list), function(i) {
+    genes <- genes_list[[i]]
+    df <- dir_df_list[[i]]
+    
+    # Filter genes based on gene names present in the corresponding DataFrame
+    matching_genes <- intersect(unlist(genes), unlist(df$gene))
+    
+    return(matching_genes)
+  })
+}
 
-ggplot(example3, aes(x=filler, y=taxa, fill=taxa_coeff)) +
-  scale_fill_gradient(low = "plum2", high = "mediumvioletred") +
-  scale_y_discrete(limits = rev(levels(example3$taxa))) +
-  geom_tile() +
-  theme_linedraw()
-ggsave("DELETELATER2.png", width=4, height=1.5)
+sig_genes_pos <- filter_genes_by_cor_dir(sig_genes, sig_df_dir_pos)
+names(sig_genes_pos) <- names(sig_genes)
+sig_genes_neg <- filter_genes_by_cor_dir(sig_genes, sig_df_dir_neg)
+names(sig_genes_neg) <- names(sig_genes)
+sig_urban_genes_pos <- filter_genes_by_cor_dir(sig_urban_genes, sig_urban_df_dir_pos)
+names(sig_urban_genes_pos) <- names(sig_urban_genes)
+sig_urban_genes_neg <- filter_genes_by_cor_dir(sig_urban_genes, sig_urban_df_dir_neg)
+names(sig_urban_genes_neg) <- names(sig_urban_genes)
+sig_rural_genes_pos <- filter_genes_by_cor_dir(sig_rural_genes, sig_rural_df_dir_pos)
+names(sig_rural_genes_pos) <- names(sig_rural_genes)
+sig_rural_genes_neg <- filter_genes_by_cor_dir(sig_rural_genes, sig_rural_df_dir_neg)
+names(sig_rural_genes_neg) <- names(sig_rural_genes)
+
 ```
 
 
 Functional analysis
 ```{r}
 annotate_ensembl <- function(ensembl_ids) {
-  ensembl = useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl", host = "jul2023.archive.ensembl.org")
+  ensembl = useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl") #, host = "jul2023.archive.ensembl.org"
 
   # Define annotations
   att_interest <- c("ensembl_gene_id", "uniprot_gn_symbol") #, "uniprot_gn_id", "entrezgene_id"
@@ -80,8 +148,51 @@ annotate_ensembl <- function(ensembl_ids) {
 
   return(annotated_data)
 }
+```
 
+```{r}
 # Apply the annotation function to each list of Ensembl gene IDs in the nested list
+sig_genes_anno <- lapply(sig_genes, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+
+sig_genes_pos_anno <- lapply(sig_genes_pos, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+
+sig_genes_neg_anno <- lapply(sig_genes_neg, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+
+for (i in names(sig_genes_anno)) {
+  result <- nrow(sig_genes_anno[[i]])
+  cat(paste("All samples: ", i, "#genes =", result, "\n"))
+}
+
+for (i in names(sig_genes_pos_anno)) {
+  result <- nrow(sig_genes_pos_anno[[i]])
+  cat(paste("All samples (pos): ", i, "#genes =", result, "\n"))
+}
+
+for (i in names(sig_genes_neg_anno)) {
+  result <- nrow(sig_genes_neg_anno[[i]])
+  cat(paste("All samples (neg): ", i, "#genes =", result, "\n"))
+}
+```
+Urban
+```{r}
 sig_urban_genes_anno <- lapply(sig_urban_genes, function(ensembl_ids) {
   if (length(ensembl_ids) > 0) {
     return(annotate_ensembl(ensembl_ids))
@@ -90,6 +201,39 @@ sig_urban_genes_anno <- lapply(sig_urban_genes, function(ensembl_ids) {
   }
 })
 
+sig_urban_genes_pos_anno <- lapply(sig_urban_genes_pos, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+
+sig_urban_genes_neg_anno <- lapply(sig_urban_genes_neg, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+
+for (i in names(sig_urban_genes_anno)) {
+  result <- nrow(sig_urban_genes_anno[[i]])
+  cat(paste("Urban samples: ", i, "#genes =", result, "\n"))
+}
+
+for (i in names(sig_urban_genes_pos_anno)) {
+  result <- nrow(sig_urban_genes_pos_anno[[i]])
+  cat(paste("Urban samples (pos): ", i, "#genes =", result, "\n"))
+}
+
+for (i in names(sig_urban_genes_neg_anno)) {
+  result <- nrow(sig_urban_genes_neg_anno[[i]])
+  cat(paste("Urban samples (neg): ", i, "#genes =", result, "\n"))
+}
+```
+Rural
+```{r}
 
 sig_rural_genes_anno <- lapply(sig_rural_genes, function(ensembl_ids) {
   if (length(ensembl_ids) > 0) {
@@ -99,11 +243,47 @@ sig_rural_genes_anno <- lapply(sig_rural_genes, function(ensembl_ids) {
   }
 })
 
+sig_rural_genes_pos_anno <- lapply(sig_rural_genes_pos, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
 
+sig_rural_genes_neg_anno <- lapply(sig_rural_genes_neg, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+
+for (i in names(sig_rural_genes_anno)) {
+  result <- nrow(sig_rural_genes_anno[[i]])
+  cat(paste("Rural samples: ", i, "#genes =", result, "\n"))
+}
+
+for (i in names(sig_rural_genes_pos_anno)) {
+  result <- nrow(sig_rural_genes_pos_anno[[i]])
+  cat(paste("Rural samples (pos): ", i, "#genes =", result, "\n"))
+}
+
+for (i in names(sig_rural_genes_neg_anno)) {
+  result <- nrow(sig_rural_genes_neg_anno[[i]])
+  cat(paste("Rural samples (neg): ", i, "#genes =", result, "\n"))
+}
 ```
+
+
 
 Functional analysis
 ```{r}
+uni <- genes
+uni <- annotate_ensembl(uni)
+uni_uniprot <- unlist(list(uni$uniprot_gn_id))
+uni_entrez <- unlist(list(uni$entrez_gene_id))
+
 uni_urban <- genes_urban
 uni_urban <- annotate_ensembl(uni_urban)
 uni_urban_uniprot <- unlist(list(uni_urban$uniprot_gn_id))
@@ -114,25 +294,53 @@ uni_rural <- annotate_ensembl(uni_rural)
 uni_rual_uniprot <- unlist(list(uni_rural$uniprot_gn_id))
 uni_rural_entrez <- unlist(list(uni_rural$entrez_gene_id))
 ```
+
+
 ```{r}
 library(msigdbr)
 
+#msigdbr_collections()
+
 # download databases of interest
+msigdb_h = msigdbr(species = "human", category = "H")
 msigdb_cpPID = msigdbr(species = "human", category = "C2", subcategory = "CP:PID")
 msigdb_cpKEGG = msigdbr(species = "human", category = "C2", subcategory = "CP:KEGG")
 msigdb_cpREACTOME = msigdbr(species = "human", category = "C2", subcategory = "CP:REACTOME")
 msigdb_cpBIOCARTA = msigdbr(species = "human", category = "C2", subcategory = "CP:BIOCARTA")
+msigdb_cgp = msigdbr(species = "human", category = "C2", subcategory = "CGP") %>%
+  mutate(gs_name = paste("CGP", gs_name, sep = "_"))
+msigdb_cgn = msigdbr(species = "human", category = "C4", subcategory = "CGN") %>%
+  mutate(gs_name = paste("CGN", gs_name, sep = "_"))
+msigdb_cm = msigdbr(species = "human", category = "C4", subcategory = "CM") %>%
+  mutate(gs_name = paste("CM", gs_name, sep = "_"))
+msigdb_IMMUNESIGDB = msigdbr(species = "human", category = "C7", subcategory = "IMMUNESIGDB") %>%
+  mutate(gs_name = paste("IMMUNESIGDB", gs_name, sep = "_"))
 
 # Experimenting with pasting these all together to reduce code burden
 msigdb_cp <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>%
-  rbind(msigdb_cpPID) 
+  rbind(msigdb_cpPID)
 
+msigdb_all <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>% #, msigdb_cpREACTOME
+  rbind(msigdb_cpPID) %>%
+  rbind(msigdb_cpBIOCARTA) %>%
+  rbind(msigdb_h) #%>%
+  #rbind(msigdb_cgp) %>%
+  #rbind(msigdb_cgn) %>%
+  #rbind(msigdb_cm)  %>%
+  #rbind(msigdb_IMMUNESIGDB)
+  
 # Summarize metrics from all pathways from all databases
 msigdb_cp_summary <- msigdb_cp %>%
   group_by(gs_name) %>%
   summarize(GeneCount = n_distinct(gene_symbol)) %>%
   # sambhawas filtering cutoffs
-  dplyr::filter(GeneCount > 5, GeneCount < 300)
+  dplyr::filter(GeneCount > 25, GeneCount < 300)
+
+msigdb_all_summary <- msigdb_all %>%
+  group_by(gs_name) %>%
+  summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  # sambhawas filtering cutoffs
+  dplyr::filter(GeneCount > 25, GeneCount < 300)
 
 # Narrow down pathways that meet our thresholds  
 msigdb_cp_filt <- msigdb_cp %>%
@@ -145,124 +353,304 @@ msigdb_cpREACTOME_filt <- msigdb_cpREACTOME %>%
   dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
 msigdb_cpBIOCARTA_filt <- msigdb_cpBIOCARTA %>%
   dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+
+msigdb_all_filt <- msigdb_all %>%
+  dplyr::filter(gs_name %in% msigdb_all_summary$gs_name)
 ```
-clusterProfiler for enrichment analysis. Once again I am trying 3 different GSEAs: "shared", "uc" and "rc"
+
+clusterProfiler for enrichment analysis.
 ```{r}
 library(clusterProfiler)
 
 # df of distinct gene symbols
 # TERM2GENE is a data frame with first column of term ID and second column of corresponding mapped gene
-msigdb_cp_t2g = msigdb_cp_filt %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+msigdb_cp_t2g = msigdb_all_filt %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
 ```
-```{r}
-# Initialize empty lists to store the results for each nested list of genes
-uc_enrich_res_list <- list()
-uc_enrich_sig_list <- list()
 
-# Iterate over each nested list of dataframes in uc_top
-for (i in seq_along(sig_urban_genes_anno)) {
-    df <- sig_urban_genes_anno[[i]]  # Extract the dataframe
+```{r}
+perform_enrichment <- function(input, msigdb_cp_t2g, uni, model, dir) {
+  enrich_res_list <- list()  # List to store all enrichment results
+  enrich_sig_list <- list()  # List to store significant enrichments
+  
+  for (i in seq_along(input)) {
+    df <- input[[i]]  # Extract the dataframe
     # Extract symbols from the current dataframe
     symbols <- df$uniprot_gn_symbol
     
     # Perform enrichment analysis for the current list of symbols
-    uc_enrich <- enricher(gene = unique(symbols),
-                          TERM2GENE = msigdb_cp_t2g,
-                          universe = uni_urban$hgnc_symbol)
+    enrich <- enricher(gene = unique(symbols),
+                       TERM2GENE = msigdb_cp_t2g,
+                       universe = uni$hgnc_symbol)
     
     # Extract results
-    uc_enrich_res <- uc_enrich@result %>% mutate(model = "uc", component = names(sig_urban_genes_anno)[i])
-    uc_enrich_res <- uc_enrich_res %>% mutate(model_component = paste(model, component, sep="."))
+    enrich_res <- enrich@result %>% mutate(model = model, dir = dir, component = names(input)[i])
+    enrich_res <- enrich_res %>% mutate(model_dir_component = paste(model, dir, component, sep="."))
     
     # Filter significant enrichments
-    uc_enrich_sig <- uc_enrich_res %>% filter(Count > 3, p.adjust < 0.1)
+    enrich_sig <- enrich_res %>% filter(Count > 2, p.adjust < 0.1)
     
     # Store results for the current dataframe
-    uc_enrich_res_list[[length(uc_enrich_res_list) + 1]] <- uc_enrich_res
-    uc_enrich_sig_list[[length(uc_enrich_sig_list) + 1]] <- uc_enrich_sig
-}
-```
-```{r}
-# Initialize empty lists to store the results for each nested list of genes
-rc_enrich_res_list <- list()
-rc_enrich_sig_list <- list()
-
-for (i in seq_along(sig_rural_genes_anno)) {
-    df <- sig_rural_genes_anno[[i]]
-    # Extract symbols from the current dataframe
-    symbols <- df$uniprot_gn_symbol
-    
-    # Perform enrichment analysis for the current list of symbols
-    rc_enrich <- enricher(gene = unique(symbols),
-                          TERM2GENE = msigdb_cp_t2g,
-                          universe = uni_rural$hgnc_symbol)
-    
-    # Extract results
-    rc_enrich_res <- rc_enrich@result %>% mutate(model = "rc", component = names(sig_rural_genes_anno)[i])
-    rc_enrich_res <- rc_enrich_res %>% mutate(model_component = paste(model, component, sep="."))
-    
-    # Filter significant enrichments
-    rc_enrich_sig <- rc_enrich_res %>% filter(Count > 3, p.adjust < 0.1)
-    
-    # Store results for the current dataframe
-    rc_enrich_res_list[[length(rc_enrich_res_list) + 1]] <- rc_enrich_res
-    rc_enrich_sig_list[[length(rc_enrich_sig_list) + 1]] <- rc_enrich_sig
+    enrich_res_list[[i]] <- enrich_res
+    enrich_sig_list[[i]] <- enrich_sig
+  }
+  
+  return(list(enrich_res_list = enrich_res_list, enrich_sig_list = enrich_sig_list))
 }
 
 ```
 
-Plot the results. Here I combined the results from my different enrichment tests "uc" and "rc"
 ```{r}
-# Suppose uc_enrich_res and rc_enrich_res are nested lists of dataframes
-# Flatten the nested lists
-uc_enrich_res_flat <- bind_rows(rc_enrich_res_list)
-rc_enrich_res_flat <- bind_rows(rc_enrich_res_list)
+sig_genes_anno_enrich <- perform_enrichment(sig_genes_anno, msigdb_cp_t2g, uni, "all", "NA")
+sig_genes_pos_anno_enrich <- perform_enrichment(sig_genes_pos_anno, msigdb_cp_t2g, uni, "all", "pos")
+sig_genes_neg_anno_enrich <- perform_enrichment(sig_genes_neg_anno, msigdb_cp_t2g, uni, "all", "neg")
 
-# Assuming uc_enrich_sig and rc_enrich_sig are also nested lists of dataframes
-uc_enrich_sig_flat <- bind_rows(uc_enrich_sig_list)
-rc_enrich_sig_flat <- bind_rows(rc_enrich_sig_list)
+sig_urban_genes_anno_enrich <- perform_enrichment(sig_urban_genes_anno, msigdb_cp_t2g, uni_urban, "urban", "NA")
+sig_urban_genes_pos_anno_enrich <- perform_enrichment(sig_urban_genes_pos_anno, msigdb_cp_t2g, uni_rural, "urban", "pos")
+sig_urban_genes_neg_anno_enrich <- perform_enrichment(sig_urban_genes_neg_anno, msigdb_cp_t2g, uni_rural, "urban", "neg")
 
-# Now filter and bind the dataframes
-enriched_pathways <- rbind(uc_enrich_sig_flat, rc_enrich_sig_flat) %>%
+sig_rural_genes_anno_enrich <- perform_enrichment(sig_rural_genes_anno, msigdb_cp_t2g, uni_rural, "rural", "NA")
+sig_rural_genes_pos_anno_enrich <- perform_enrichment(sig_rural_genes_pos_anno, msigdb_cp_t2g, uni_rural, "rural", "pos")
+sig_rural_genes_neg_anno_enrich <- perform_enrichment(sig_rural_genes_neg_anno, msigdb_cp_t2g, uni_rural, "rural", "neg")
+```
+Flatten
+```{r}
+all_enrich_res <- do.call(rbind, sig_genes_anno_enrich$enrich_res_list)
+all_pos_enrich_res <- do.call(rbind, sig_genes_pos_anno_enrich$enrich_res_list)
+all_neg_enrich_res <- do.call(rbind, sig_genes_neg_anno_enrich$enrich_res_list)
+
+u_enrich_res <- do.call(rbind, sig_urban_genes_anno_enrich$enrich_res_list)
+u_pos_enrich_res <- do.call(rbind, sig_urban_genes_pos_anno_enrich$enrich_res_list)
+u_neg_enrich_res <- do.call(rbind, sig_urban_genes_neg_anno_enrich$enrich_res_list)
+
+r_enrich_res <- do.call(rbind, sig_rural_genes_anno_enrich$enrich_res_list)
+r_pos__enrich_res <- do.call(rbind, sig_rural_genes_pos_anno_enrich$enrich_res_list)
+r_neg_enrich_res <- do.call(rbind, sig_rural_genes_neg_anno_enrich$enrich_res_list)
+
+
+
+all_enrich_sig <- do.call(rbind, sig_genes_anno_enrich$enrich_sig_list)
+all_pos_enrich_sig <- do.call(rbind, sig_genes_pos_anno_enrich$enrich_sig_list)
+all_neg_enrich_sig <- do.call(rbind, sig_genes_neg_anno_enrich$enrich_sig_list)
+
+u_enrich_sig <- do.call(rbind, sig_urban_genes_anno_enrich$enrich_sig_list)
+u_pos_enrich_sig <- do.call(rbind, sig_urban_genes_pos_anno_enrich$enrich_sig_list)
+u_neg_enrich_sig <- do.call(rbind, sig_urban_genes_neg_anno_enrich$enrich_sig_list)
+
+r_enrich_sig <- do.call(rbind, sig_rural_genes_anno_enrich$enrich_sig_list)
+r_pos_enrich_sig <- do.call(rbind, sig_rural_genes_pos_anno_enrich$enrich_sig_list)
+r_neg_enrich_sig <- do.call(rbind, sig_rural_genes_neg_anno_enrich$enrich_sig_list)
+```
+
+Plot
+```{r}
+enriched_pathways_func <- function(df_pos, df_neg){
+  enriched_pathways <- rbind(df_pos, df_neg) %>%
   mutate(db = case_when(
+    grepl("HALLMARK", ID) ~ "Hallmark",
     grepl("REACTOME", ID) ~ "Reactome",
     grepl("KEGG", ID) ~ "KEGG",
     grepl("PID", ID) ~ "PID",
+    grepl("BIOCARTA", ID) ~ "Biocarta",
+    grepl("CGP", ID) ~ "CGP",
+    grepl("CGN", ID) ~ "CGN",
+    grepl("CM", ID) ~ "CM",
+    grepl("IMMUNESIGDB", ID) ~ "IMMUNESIGDB",
     TRUE ~ "Other"  # Add a default value for other cases
   )) %>%
   mutate(ID_2 = gsub("^[^_]+_", "", ID)) %>%
   mutate(ID_2 = gsub("_", " ", ID_2)) %>%
-  mutate(ID_2 = paste0(toupper(substring(ID_2, 1, 1)), tolower(substring(ID_2, 2)))) %>%
+  mutate(ID_3 = str_sub(ID_2, 1, 40)) %>%
   mutate(neglog10_p.adjust = -log10(p.adjust)) %>%
   mutate(neglog10_p.adjust = as.numeric(neglog10_p.adjust)) %>%
   mutate(GeneRatio_numeric = sapply(strsplit(as.character(GeneRatio), "/"), function(x) as.numeric(x[1])/as.numeric(x[2]))) %>%
-  #arrange(GeneRatio_numeric)
   arrange(GeneRatio_numeric)
-enriched_pathways$ID_2 <- factor(enriched_pathways$ID_2, levels=unique(enriched_pathways$ID_2))
 
-# I DON'T KNOW IF THIS IS THE BEST WAY TO DO THIS... 
-# BUT TO REDUCE REDUNDANCY, PICK ID_2 WITH LARGEST PADJ
-# IF SEVERAL HAVE SAME GENERATIO
 enriched_pathways2 <- enriched_pathways %>%
-  group_by(model_component, GeneRatio_numeric) %>%
-  slice(which.max(neglog10_p.adjust)) %>%
-  ungroup()
+  group_by(model_dir_component, GeneRatio_numeric) %>%
+  #dplyr::slice(which.max(neglog10_p.adjust)) %>%
+  ungroup() %>%
+  arrange(GeneRatio_numeric) #%>%
+  #dplyr::slice(1:15)
 
-ggplot(enriched_pathways, aes(x=GeneRatio_numeric, y=ID_2, fill=model, color=model, size=neglog10_p.adjust)) + 
-  geom_point() +
-  scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
-  scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
-  facet_grid(model_component ~ ., scales="free", space="free") +
-  theme_linedraw()
+enriched_pathways2$ID_3 <- factor(enriched_pathways2$ID_3, levels=unique(enriched_pathways2$ID_3))
 
-ggplot(enriched_pathways2, aes(x=GeneRatio_numeric, y=ID_2, fill=model, color=model, size=neglog10_p.adjust)) + 
-  geom_point() +
+return(enriched_pathways2)
+}
+
+```
+```{r}
+enriched_pathways_all_nodir <- enriched_pathways_func(all_enrich_sig, NULL)
+enriched_pathways_urban_nodir <- enriched_pathways_func(u_enrich_sig, NULL)
+enriched_pathways_rural_nodir <- enriched_pathways_func(r_enrich_sig, NULL)
+
+enriched_pathways_all <- enriched_pathways_func(all_pos_enrich_sig, all_neg_enrich_sig)
+enriched_pathways_urban <- enriched_pathways_func(u_pos_enrich_sig, u_neg_enrich_sig)
+enriched_pathways_rural <- enriched_pathways_func(r_pos_enrich_sig, r_neg_enrich_sig)
+
+enriched_pathways_all$dir <- factor(enriched_pathways_all$dir, levels=c("pos", "neg"))
+enriched_pathways_urban$dir <- factor(enriched_pathways_urban$dir, levels=c("pos", "neg"))
+enriched_pathways_rural$dir <- factor(enriched_pathways_rural$dir, levels=c("pos", "neg"))
+
+
+enriched_pathways_all_nodir $component <- factor(enriched_pathways_all_nodir $component, levels=c("component_1", "component_2","component_3","component_4","component_5","component_6","component_7","component_8","component_9","component_10"))
+enriched_pathways_urban_nodir $component <- factor(enriched_pathways_urban_nodir $component, levels=c("component_1", "component_2","component_3","component_4","component_5","component_6","component_7","component_8","component_9","component_10"))
+enriched_pathways_rural_nodir $component <- factor(enriched_pathways_rural_nodir $component, levels=c("component_1", "component_2","component_3","component_4","component_5","component_6","component_7","component_8","component_9","component_10"))
+
+
+
+enriched_pathways_all$component <- factor(enriched_pathways_all$component, levels=c("component_1", "component_2","component_3","component_4","component_5","component_6","component_7","component_8","component_9","component_10"))
+enriched_pathways_urban$component <- factor(enriched_pathways_urban$component, levels=c("component_1", "component_2","component_3","component_4","component_5","component_6","component_7","component_8","component_9","component_10"))
+enriched_pathways_rural$component <- factor(enriched_pathways_rural$component, levels=c("component_1", "component_2","component_3","component_4","component_5","component_6","component_7","component_8","component_9","component_10"))
+```
+
+```{r}
+
+ggplot(enriched_pathways_all, aes(x=GeneRatio_numeric, y=ID_3, size=neglog10_p.adjust)) + #fill=model, color=model,
+  geom_point(color="grey20", fill="grey20") +
   scale_y_discrete(position = "right") +
-  scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
-  scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
-  facet_grid(model_component ~ ., scales="free", space="free") +
-  theme_linedraw() 
-ggsave("results/figs/RNAseq-metaG-microbe-SparseCCA/enriched_pathways2.png", width=8.5, height=4.5)
+  #scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  #scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(component + dir ~ ., scales="free", space="free") +
+  theme_linedraw() #+
+  #scale_size_continuous(range = c(1, 6), name = "-log10(p.adjust)") +
+  #xlim(values=c(0,0.15))
+#ggsave("results/figs/RNAseq-metaG-microbe-SparseCCA/enriched_pathways.png", width=7.5, height=2)
+
+ggplot(enriched_pathways_urban, aes(x=GeneRatio_numeric, y=ID_3, size=neglog10_p.adjust)) + #fill=model, color=model,
+  geom_point(color="grey20", fill="grey20", aes(size=neglog10_p.adjust)) +
+  scale_y_discrete(position = "right") +
+  #scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  #scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(component + dir ~ ., scales="free", space="free") +
+  theme_linedraw() #+
+  #scale_size_continuous(range = c(1, 6), name = "-log10(p.adjust)")#+
+  #xlim(values=c(0,0.15))
+#ggsave("results/figs/RNAseq-metaG-microbe-SparseCCA/enriched_pathways_urban.png", width=7.5, height=3)
+
+ggplot(enriched_pathways_rural, aes(x=GeneRatio_numeric, y=ID_3, size=neglog10_p.adjust)) + #fill=model, color=model,
+  geom_point(color="grey20", fill="grey20", aes(size=neglog10_p.adjust)) +
+  scale_y_discrete(position = "right") +
+  #scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  #scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  facet_grid(component + dir ~ ., scales="free", space="free") +
+  theme_linedraw() #+
+  #scale_size_continuous(range = c(1, 6), name = "-log10(p.adjust)")#+
+  #xlim(values=c(0,0.15))
+#ggsave("results/figs/RNAseq-metaG-microbe-SparseCCA/enriched_pathways_rural.png", width=7.5, height=5)
+```
+
+```{r}
+check_urban <- c("TBCEL",
+"ITGA3",
+"SEPHS1",
+"CLINT1",
+"SYF2",
+"ANP32B",
+"APTX",
+"ATP8B2",
+"BTF3",
+"MTG1",
+"MEGF6",
+"E2F7",
+"NKX3-1",
+"MYADM",
+"NDOR1")
+
+check_rural <- c(
+  "TBCEL",
+"ITGA3",
+"SEPHS1",
+"CLINT1",
+"SYF2",
+"ANP32B",
+"APTX",
+"ATP8B2",
+"BTF3",
+"MTG1",
+"MEGF6",
+"E2F7",
+"NKX3-1",
+"MYADM",
+"NDOR1",
+"RBM7",
+"ARAP3",
+"BRCC3",
+"MSANTD1",
+"ST20-MTHFS",
+"SDK2",
+"KIF3C",
+"ERH",
+"KCNS2",
+"POLE2",
+"HMGB1",
+"RPL26L1",
+"SRRT",
+"PQBP1",
+"FBXL20",
+"RAB35",
+"MRPL19",
+"PROSER1",
+"FAM213B",
+"RNF183",
+"ZNF606",
+"CHRNA5",
+"RND1",
+"VANGL1",
+"NDUFV2",
+"C6orf58",
+"BCAM",
+"ASAH2B",
+"ZNF580",
+"ARHGEF38",
+"INAFM1",
+"ARMC5",
+"DPH3",
+"PITPNM2",
+"SLC39A14",
+"RCBTB2",
+"MAD1L1",
+"GCLM",
+"CACNA1I",
+"ARHGDIB",
+"SRF",
+"DNAH6",
+"CAMKMT",
+"RNF150",
+"MSRA",
+"SPRYD4",
+"OVCH2",
+"OGDHL",
+"CTXN2",
+"ZNF853"
+)
+
+
+pattern_urban <- paste0("(^|/)", check_urban, "($|/)") %>%
+  paste(collapse = "|")
+
+# Filter the data frame and include all matching terms
+check_urban_result <- enriched_pathways_urban %>%
+  rowwise() %>%
+  mutate(matching_genes = str_extract_all(geneID, pattern_urban) %>% 
+                          unlist() %>% 
+                          unique() %>% 
+                          paste(collapse = ", ")) %>%
+  dplyr::filter(matching_genes != "") %>%
+  dplyr::select(ID_3, model_dir_component, matching_genes, GeneRatio_numeric, p.adjust)
+
+
+pattern_rural <- paste0("(^|/)", check_rural, "($|/)") %>%
+  paste(collapse = "|")
+
+# Filter the data frame and include all matching terms
+check_rural_result <- enriched_pathways_rural %>%
+  rowwise() %>%
+  mutate(matching_genes = str_extract_all(geneID, pattern_rural) %>% 
+                          unlist() %>% 
+                          unique() %>% 
+                          paste(collapse = ", ")) %>%
+  dplyr::filter(matching_genes != "") %>%
+  dplyr::select(ID_3, model_dir_component, matching_genes, GeneRatio_numeric, p.adjust)
 
 ```
 

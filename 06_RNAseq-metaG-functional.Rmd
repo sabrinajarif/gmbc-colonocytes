@@ -294,6 +294,68 @@ pathway_covariates_list[['SampleName']] <- NULL
 pathway_covariates_list[['mc_UNMAPPED']] <- NULL
 ```
 
+
+
+```{r}
+test <- pathway_abundances_filt2_r_t %>%
+  dplyr::select(SampleName,
+                mc_PWY_7383__anaerobic_energy_metabolism__invertebrates__cytosol_,
+         mc_TRNA_CHARGING_PWY__tRNA_charging,
+         mc_CITRULBIO_PWY__L_citrulline_biosynthesis,
+         mc_PWY_4984__urea_cycle,
+         mc_OANTIGEN_PWY__O_antigen_building_blocks_biosynthesis__E__coli_,
+         mc_UDPNAGSYN_PWY__UDP_N_acetyl_D_glucosamine_biosynthesis_I
+         ) %>%
+  pivot_longer(cols = -SampleName, names_to = "functions", values_to = "relative_abundance") %>%
+  merge(meta[,c("SampleName", "urbanism")], by="SampleName")
+
+ggplot(dplyr::filter(test, functions=="mc_UDPNAGSYN_PWY__UDP_N_acetyl_D_glucosamine_biosynthesis_I"), aes(x=urbanism, y=relative_abundance, fill=urbanism)) +
+  geom_boxplot() +
+  scale_fill_manual(values=c("#6FBD8B", "#7B2BC1")) + 
+  theme_linedraw() + 
+  theme_linedraw() +
+  labs(x = "mc_UDPNAGSYN_PWY__UDP_N_acetyl_D_glucosamine_biosynthesis_I", y = NULL) +  # Remove x and y axis titles
+  theme(
+    legend.position = "none",  # Remove the legend
+    axis.text.x = element_blank()  
+  )
+ggsave("results/figs/RNAseq-metaG-function-SparseCCA/mc_UDPNAGSYN_PWY__UDP_N_acetyl_D_glucosamine_biosynthesis_I.png", width=1.5, height=1.5)
+
+```
+
+
+```{r}
+target_colnames <- c("mc_PWY_7383__anaerobic_energy_metabolism__invertebrates__cytosol_",
+         "mc_TRNA_CHARGING_PWY__tRNA_charging",
+         "mc_CITRULBIO_PWY__L_citrulline_biosynthesis",
+         "mc_PWY_4984__urea_cycle",
+         "mc_OANTIGEN_PWY__O_antigen_building_blocks_biosynthesis__E__coli_",
+         "mc_UDPNAGSYN_PWY__UDP_N_acetyl_D_glucosamine_biosynthesis_I"
+         )
+
+# Get the column names of your data frame
+df_rownames <- rownames(pathway_abundances_filt3_r)
+
+# Find the intersection of the data frame's column names and your list
+matching_colnames <- intersect(df_rownames, target_colnames)
+matching_colnames
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Load raw read counts
 ```{r}
 raw_read_cts_filt <- read.csv("results/docs/raw_read_cts_filt.csv", row.names=1) 
