@@ -11,7 +11,9 @@ library(ggpubr)
 library(DESeq2)
 library(ALDEx2)
 library(compositions)
+library(clipr)
 ```
+
 
 Tidy up data
 ```{r}
@@ -74,11 +76,70 @@ setdiff(row.names(bracken_species_combined_num), row.names(taxonomy_sep_select))
 head(bracken_species_combined_num)
 head(taxonomy_sep_select)
 ```
+
+
+
+
+Import updated names
+```{r}
+taxonomy_names_updated <- read.csv("data/metaG-taxonomy/taxonomic_names_updates.tsv", sep="\t", header=T) %>%
+  # 1) Remove the prefix (p_, c_, o_, f_, g_, s_)
+  mutate(across(everything(), ~ gsub("^[pcofgs]?_", "", .))) %>%
+  # 2) Remove any leading underscore
+  mutate(across(everything(), ~ gsub("^_", "", .))) %>%
+  # 3) Replace spaces with underscores in the species column
+  mutate(species = if("species" %in% names(.)) gsub(" ", "_", species) else species) %>%
+  # 4) Rename the columns to just the first letter of the current name
+  rename_with(~ substr(., 1, 1), -1) %>%
+  mutate(across(everything(), ~ ifelse(. == "" | . == "_", NA, .))) %>%
+  #column_to_rownames("oldTaxonomy") %>%
+  mutate(d = NA, k = NA) %>%
+  dplyr::select(d,k,p,c,o,f,g,s, everything()) %>%
+  {rownames(.) <- gsub("\\.", "", rownames(.)); .}
+```
+
+
+
+There discrepancies between the old and new classifications.
+The new classifications have updated names (Firmicutes is not Bacillota, for ex)
+Since changing all the taxonomy would mess up the gloms for the remainder of the OTU table, let's just update the species names. 
+
+
+Update the tax table
+```{r}
+taxonomy_sep_updated <- taxonomy_sep_select %>%
+  left_join(taxonomy_names_updated[,c("s", "oldTaxonomy")], by = c("s" = "oldTaxonomy")) %>%
+  mutate(s = ifelse(is.na(s.y), s, s.y)) %>%
+  dplyr::select(-s.y) %>%
+    # remove special cases, there were only 5
+  distinct(s, .keep_all = TRUE)
+nrow(taxonomy_sep_updated)
+length(unique(taxonomy_sep_updated$s))
+
+rownames(taxonomy_sep_updated) <- taxonomy_sep_updated$s 
+
+```
+
+
+
+Update the OTU table 
+```{r}
+bracken_species_combined_num_updated <- bracken_species_combined_num %>%
+  rownames_to_column("s") %>%
+  left_join(taxonomy_names_updated[,c("s", "oldTaxonomy")], by = c("s" = "oldTaxonomy")) %>%
+  mutate(s = ifelse(is.na(s.y), s, s.y)) %>%
+  dplyr::select(-s.y) %>%
+  distinct(s, .keep_all = TRUE) %>%
+  column_to_rownames("s")
+```
+
+
+
 Import metadata
 ```{r}
 GMCC_covariates_all_batches <- read.csv("data/metadata/GMCC_covariates_all_batches.csv", header=T)
 # Identify missing samples
-remove_from_abun <- setdiff(colnames(bracken_species_combined_num), GMCC_covariates_all_batches$SampleName)
+remove_from_abun <- setdiff(colnames(bracken_species_combined_num_updated), GMCC_covariates_all_batches$SampleName)
 remove_from_meta <- setdiff(GMCC_covariates_all_batches$SampleName, colnames(bracken_species_combined_num))
 # Clean up metadata specific for this analysis
 meta <- GMCC_covariates_all_batches %>%
@@ -97,6 +158,69 @@ meta <- GMCC_covariates_all_batches %>%
     country == "Rwanda" ~ "data/metaG-QC/flags/rwanda.svg",
     country == "USA" ~ "data/metaG-QC/flags/usa.svg")) 
 ```
+
+Check metadata for samples on lower end of read counts (1-5 million- do these contain rare taxa?)
+QC plot of total reads pre and post alignment
+```{r}
+post_trim_reads <- read.table("data/metaG-QC/trimmed_reads_summary.txt", header=1)  %>%
+  mutate(Sample = gsub("_P_1_kneaddata", "", Sample)) %>%
+  dplyr::filter(Sample %in% meta$SampleName)
+total_reads <- as.data.frame(colSums(bracken_species_combined_num)) %>%
+  rownames_to_column("Sample") %>%
+  dplyr::filter(Sample %in% meta$SampleName) %>%
+  dplyr::rename("post_align" = 2) %>%
+  merge(post_trim_reads, by="Sample") %>%
+  dplyr::mutate(mapping_rate = post_align / Trimmed_Pair1_Reads) %>%
+  dplyr::mutate(trimmed_sum = Trimmed_Pair1_Reads + Trimmed_Pair2_Reads)
+```
+```{r}
+#ggplot(total_reads, aes(x=reorder(Sample, trimmed_sum), y=trimmed_sum)) +
+# Define the bin width
+bin_width <- 10000000
+
+# Calculate breaks and labels
+breaks <- seq(
+  from = floor(min(total_reads$trimmed_sum) / bin_width) * bin_width,
+  to = ceiling(max(total_reads$trimmed_sum) / bin_width) * bin_width,
+  by = bin_width
+)
+centers <- breaks[-length(breaks)] + bin_width / 2  # Bin centers
+
+# Generate labels in scientific notation with a new line between ranges
+labels <- paste0(
+  scales::label_scientific()(breaks[-length(breaks)]), 
+  " - \n", 
+  scales::label_scientific()(breaks[-1])
+)
+
+# Plot with debugging aids
+ggplot(total_reads, aes(x = trimmed_sum)) +
+  geom_histogram(
+    binwidth = bin_width, 
+    fill = "#1780a1", 
+    color = "black", 
+    boundary = min(breaks)  # Ensure alignment with breaks
+  ) +
+  scale_x_continuous(
+    breaks = centers,  # Use bin centers for labels
+    labels = labels
+  ) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 22)) +  # Ensure the y-axis starts at 0
+  theme_linedraw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(hjust = 0.5, size = 10)  # Center alignment
+  ) 
+
+```
+
+```{r}
+total_reads_annotated <- total_reads %>%
+  dplyr::rename(SampleName=Sample) %>%
+  merge(meta[,c("SampleName", "urbanism", "lifestyle2", "SampleID", "country")], by="SampleName")
+```
+
 Impute some missing values for USA samples
 
 ```{r}
@@ -136,13 +260,13 @@ meta$sex[meta$SampleName %in% imputed_samples$SampleName] <- imputed_samples$sex
 
 Convert to phyloseq format
 ```{r}
-abun_phy <- bracken_species_combined_num %>%
+abun_phy <- bracken_species_combined_num_updated %>%
     # Prune abundance table of samples missing from metadata
     dplyr::select(!all_of(remove_from_abun)) %>%
     as.matrix() %>%
     otu_table(taxa_are_rows = T) 
 
-tax_phy <- taxonomy_sep_select %>%
+tax_phy <- taxonomy_sep_updated %>%
     as.matrix() %>%
     tax_table() 
 
@@ -153,10 +277,13 @@ phy <- phyloseq(abun_phy, tax_phy, meta_phy)
 phy
 ```
 
+
+
+
 Glom to different taxonomic levels. Important to update row names.
 ```{r}
-glom_func <- function(tax_level_quotes) {
-  phy_glom <- tax_glom(phy, tax_level_quotes)
+glom_func <- function(phy, tax_level_quotes) {
+  phy_glom <- tax_glom(phy, tax_level_quotes) 
   otu <- as.data.frame(phyloseq::otu_table(phy_glom))
   tax <- as.data.frame(phyloseq::tax_table(phy_glom)) %>%
     dplyr::select(d:tax_level_quotes)
@@ -168,12 +295,13 @@ glom_func <- function(tax_level_quotes) {
   return(phy_glom_updated )
 }
 
-phy_s <- glom_func("s")
-phy_g <- glom_func("g")
-phy_f <- glom_func("f")
-phy_o <- glom_func("o")
-phy_c <- glom_func("c")
-phy_p <- glom_func("p")
+phy_s <- glom_func(phy, "s")
+phy_g <- glom_func(phy, "g")
+phy_f <- glom_func(phy, "f")
+phy_o <- glom_func(phy, "o")
+phy_c <- glom_func(phy, "c")
+phy_p <- glom_func(phy, "p")
+
 
 paste("# OTUs s: ", nrow(tax_table(phy_s)))
 paste("# OTUs g: ", nrow(tax_table(phy_g)))
@@ -246,6 +374,7 @@ paste("pre-filt c: ", nrow(tax_table(phy_c)))
 paste0("post-filt c: ", nrow(tax_table(phy_filt_c)))
 paste("pre-filt p: ", nrow(tax_table(phy_p)))
 paste0("post-filt p: ", nrow(tax_table(phy_filt_p)))
+
 ```
 ```{r}
 # Total number of taxa pre-filt
@@ -265,34 +394,134 @@ nrow(tax_table(phy_filt_s)) +
   nrow(tax_table(phy_filt_p))
 ```
 
-
-
-ALDEx2 for differential abundance testing. We will filter these a few steps later. Negative effect size indicates the microbe is primarily found in rural, positive effect size means urban.
-
-Explanation of output:
-* rab.all - median clr value for all samples in the feature
-* rab.win.NS - median clr value for the NS group of samples
-* rab.win.S - median clr value for the S group of samples
-* rab.X1_BNS.q50 - median expression value of features in sample X1_BNS if include.item.summary=TRUE
-* dif.btw - median difference in clr values between S and NS groups
-* dif.win - median of the largest difference in clr values within S and NS groups
-* effect - median effect size: diff.btw / max(diff.win) for all instances
-* overlap - proportion of effect size distribution that overlaps 0 (i.e. no effect)
-∗ we.ep - Expected p-value of Welch’s t-test, a posterior predictive p-value
-∗ we.eBH - Expected Benjamini-Hochberg corrected p-value of Welch’s t test
-∗ wi.ep - Expected p-value of Wilcoxon rank test
-∗ wi.eBH - Expected Benjamini-Hochberg corrected p-value of Wilcoxon test
-
-I believe the order of operations within aldex is this:
-1) Model data as dirichlet distribution
-2) Monte Carlo
-3) CLR transform
-4) Differential abundance testing
+Save all to file
 ```{r}
-## Functions
+saveRDS(phy_filt_s, "results/rds/phy_filt_s.rds")
+saveRDS(phy_filt_g, "results/rds/phy_filt_g.rds")
+saveRDS(phy_filt_f, "results/rds/phy_filt_f.rds")
+saveRDS(phy_filt_o, "results/rds/phy_filt_o.rds")
+saveRDS(phy_filt_c, "results/rds/phy_filt_c.rds")
+saveRDS(phy_filt_p, "results/rds/phy_filt_p.rds")
+```
 
-aldex2_func <- function(phy) {
-  ALDEx2::aldex.clr(as.data.frame(phyloseq::otu_table(phy)),
+
+
+
+
+
+
+
+
+
+
+```{r}
+covariates <- phyloseq::sample_data(phy_filt_g) %>%
+  data.frame() %>%
+  dplyr::select(urbanism, country, age, sex)
+mm <- model.matrix(~ urbanism + country + age + sex, covariates)
+
+# phylum
+x.glm_p <- aldex.clr(as.data.frame(otu_table(phy_filt_p)), mm, mc.samples=128, denom="all", verbose=T)
+glm.test_p <- aldex.glm(x.glm_p, mm)
+glm.eff_p <- aldex.glm.effect(x.glm_p)
+glm_p_res <- cbind(glm.eff_p[1], glm.test_p) %>%
+  rename_with(~ str_replace_all(., ":", "_")) 
+glm_p_sig <- glm_p_res %>%
+  dplyr::filter(urbanismurban_pval.holm < 0.1)
+
+# class
+x.glm_c <- aldex.clr(as.data.frame(otu_table(phy_filt_c)), mm, mc.samples=128, denom="all", verbose=T)
+glm.test_c <- aldex.glm(x.glm_c, mm)
+glm.eff_c <- aldex.glm.effect(x.glm_c)
+glm_c_res <- cbind(glm.eff_c[1], glm.test_c) %>%
+  rename_with(~ str_replace_all(., ":", "_")) 
+glm_c_sig <- glm_c_res %>%
+  dplyr::filter(urbanismurban_pval.holm < 0.1)
+
+# order
+x.glm_o <- aldex.clr(as.data.frame(otu_table(phy_filt_o)), mm, mc.samples=128, denom="all", verbose=T)
+glm.test_o <- aldex.glm(x.glm_o, mm)
+glm.eff_o <- aldex.glm.effect(x.glm_o)
+glm_o_res <- cbind(glm.eff_o[1], glm.test_o) %>%
+  rename_with(~ str_replace_all(., ":", "_")) 
+glm_o_sig <- glm_o_res %>%
+  dplyr::filter(urbanismurban_pval.holm < 0.1)
+
+# family
+x.glm_f <- aldex.clr(as.data.frame(otu_table(phy_filt_f)), mm, mc.samples=128, denom="all", verbose=T)
+glm.test_f <- aldex.glm(x.glm_f, mm)
+glm.eff_f <- aldex.glm.effect(x.glm_f)
+glm_f_res <- cbind(glm.eff_f[1], glm.test_f) %>%
+  rename_with(~ str_replace_all(., ":", "_")) 
+glm_f_sig <- glm_f_res %>%
+  dplyr::filter(urbanismurban_pval.holm < 0.1)
+
+# genus
+x.glm_g <- aldex.clr(as.data.frame(otu_table(phy_filt_g)), mm, mc.samples=128, denom="all", verbose=T)
+glm.test_g <- aldex.glm(x.glm_g, mm)
+glm.eff_g <- aldex.glm.effect(x.glm_g)
+glm_g_res <- cbind(glm.eff_g[1], glm.test_g) %>%
+  rename_with(~ str_replace_all(., ":", "_")) 
+glm_g_sig <- glm_g_res %>%
+  dplyr::filter(urbanismurban_pval.holm < 0.1)
+
+# species
+x.glm_s <- aldex.clr(as.data.frame(otu_table(phy_filt_s)), mm, mc.samples=128, denom="all", verbose=T)
+glm.test_s <- aldex.glm(x.glm_s, mm)
+glm.eff_s <- aldex.glm.effect(x.glm_s)
+glm_s_res <- cbind(glm.eff_s[1], glm.test_s) %>%
+  rename_with(~ str_replace_all(., ":", "_")) 
+glm_s_sig <- glm_s_res %>%
+  dplyr::filter(urbanismurban_pval.holm < 0.1)
+```
+
+
+Combine with taxonomy for supplementary table
+```{r}
+aldex2_summary_func <- function(res_df, tax_level_quotes) {
+  summary_table <- res_df %>%
+  rownames_to_column(tax_level_quotes) %>%
+  #left_join(taxonomy_sep_updated, by=tax_level_quotes)  %>%
+  dplyr::select(tax_level_quotes,urbanismurban.effect,urbanismurban_pval.holm) %>%
+  #dplyr::select(1, urbanismurban.effect,urbanismurban_pval.holm) %>%
+  #dplyr::rename(taxa=1) %>%
+  dplyr::rename(effect=urbanismurban.effect) %>%
+  dplyr::rename(pval.holm=urbanismurban_pval.holm) %>%
+  dplyr::mutate(enriched_in = case_when(effect > 0 ~ "Industrialized",
+                                        effect < 0 ~ "Non-Industrialized")) %>%
+  dplyr::arrange(effect)
+}
+  
+glm_s_table <- aldex2_summary_func(glm_s_res, "s")
+glm_g_table <- aldex2_summary_func(glm_g_res, "g")
+glm_f_table <- aldex2_summary_func(glm_f_res, "f")
+glm_o_table <- aldex2_summary_func(glm_o_res, "o")
+glm_c_table <- aldex2_summary_func(glm_c_res, "c")
+glm_p_table <- aldex2_summary_func(glm_p_res, "p")
+
+#glm_s_sig_table <- glm_s_table %>% dplyr::filter(pval.holm < 0.1) 
+#write_clip(glm_s_sig_table)
+#glm_g_sig_table <- glm_g_table %>% dplyr::filter(pval.holm < 0.1) %>% dplyr::distinct()
+#write_clip(glm_g_sig_table)
+#glm_f_sig_table <- glm_f_table %>% dplyr::filter(pval.holm < 0.1) %>% dplyr::distinct()
+#write_clip(glm_f_sig_table)
+#glm_o_sig_table <- glm_o_table %>% dplyr::filter(pval.holm < 0.1)  %>% dplyr::distinct()
+#write_clip(glm_o_sig_table)
+#glm_c_sig_table <- glm_c_table %>% dplyr::filter(pval.holm < 0.1) %>% dplyr::distinct()
+#write_clip(glm_c_sig_table)
+#glm_p_sig_table <- glm_p_table %>% dplyr::filter(pval.holm < 0.1) %>% dplyr::distinct()
+#write_clip(glm_p_sig_table)
+
+# save for downstream use
+glm_results_urbanism <- list(s=glm_s_table, g=glm_g_table, f=glm_f_table, o=glm_o_table, c=glm_c_table, p=glm_p_table)
+saveRDS(glm_results_urbanism, "results/rds/glm_results_urbanism.rds")
+```
+
+
+More functions
+```{r}
+aldex2_test <- function(phy) {
+  ALDEx2::aldex.clr(as.data.frame(phyloseq::otu_table(phy)), 
                     phyloseq::sample_data(phy)$urbanism, 
                     mc.samples=128, 
                     denom="all", 
@@ -315,31 +544,7 @@ aldex2_cts <- function(aldex_obj){
   return(row_means_df)
 }
 
-#aldex2_cts <- function(aldex_obj){
-#  x.counts_obj <- getMonteCarloInstances(aldex_obj)
-#  x.counts <- as.data.frame(x.counts_obj$reads) 
-#  return(x.counts)
-#}
-```
-```{r}
-covariates <- phyloseq::sample_data(phy_filt_g) %>%
-  data.frame() %>%
-  dplyr::select(urbanism, country)
-mm <- model.matrix(~ urbanism, covariates)
-x.glm <- aldex.clr(as.data.frame(otu_table(phy_filt_g)), mm, mc.samples=128, denom="all", verbose=T)
-glm.test <- aldex.glm(x.glm, mm)
-glm.eff<- aldex.glm.effect(x.glm)
-```
 
-More functions
-```{r}
-aldex2_test <- function(phy) {
-  ALDEx2::aldex.clr(as.data.frame(phyloseq::otu_table(phy)), 
-                    phyloseq::sample_data(phy)$urbanism, 
-                    mc.samples=128, 
-                    denom="all", 
-                    verbose=F,
-                    useMC=T) }
 
 
 aldex2_res <- function(aldex_obj) {
@@ -389,6 +594,8 @@ aldex2_clr_o_cts <- aldex2_cts(aldex2_clr_o)
 aldex2_clr_c_cts <- aldex2_cts(aldex2_clr_c)
 aldex2_clr_p_cts <- aldex2_cts(aldex2_clr_p)
 
+#write.csv(aldex2_clr_s_cts, "results/docs/clr_species.csv")
+
 # df of results
 aldex2_clr_s_res <- aldex2_res(aldex2_clr_s)
 aldex2_clr_g_res <- aldex2_res(aldex2_clr_g)
@@ -412,7 +619,7 @@ aldex2_clr_all_sig <- rbind(aldex2_clr_s_sig, aldex2_clr_g_sig) %>%
   rbind(aldex2_clr_c_sig) %>%
   rbind(aldex2_clr_p_sig)
 
-#write.csv(aldex2_clr_all_sig, "results/docs/DA_microbe_aldex2.csv")
+write.csv(aldex2_clr_all_sig, "results/docs/DA_microbe_aldex2.csv")
 
 # plot
 aldex2_plot(aldex2_clr_s_res)
@@ -432,8 +639,17 @@ da_s$Species <- factor(da_s$Species, levels = unlist(da_s$Species))
 
 ggplot(da_s, aes(x=effect, y=Species)) +
   geom_point(aes(color=wi.eBH))
+ggsave("results/figs/metaG-PCoA/sup_DA.png", width=5, height=7.5)
 ```
+```{r}
+da_g <- aldex2_clr_g_sig %>%
+  rownames_to_column("Genus") %>%
+  arrange(effect)
+da_g$Genus <- factor(da_g$Genus, levels = unlist(da_g$Genus))
 
+ggplot(da_g, aes(x=effect, y=Genus)) +
+  geom_point(aes(color=wi.eBH))
+```
 
 
 
@@ -459,7 +675,550 @@ phy_clr_filt_p <- phy_filt_p
 otu_table(phy_clr_filt_p) <- otu_table(aldex2_clr_p_cts, taxa_are_rows = T)
 
 paste("ALDEx2 significant OTUs:",nrow(aldex2_clr_all_sig))
+
+row.names(otu_table(phy_filt_f))
 ```
+
+Alpha diversity of urban and rural
+```{r}
+phy_shannon <- estimate_richness(phy) %>%
+  rownames_to_column("SampleName") %>%
+  dplyr::mutate(SampleName = str_remove(SampleName, "^X")) %>%
+  left_join(meta[,c("SampleName", "urbanism")], by ="SampleName")
+
+write.csv(phy_shannon, "data/metadata/richness.csv")
+
+ggplot(phy_shannon, aes(x=urbanism, y=Shannon, fill=urbanism)) +
+  geom_boxplot() +
+  scale_fill_manual(values=c("#6FBD8B", "#7B2BC1")) +
+  geom_point()
+
+# Perform Wilcoxon test
+wilcox_test <- wilcox.test(Shannon ~ urbanism, data = phy_shannon)
+
+# Print the p-value
+print(wilcox_test$p.value)
+
+# Perform t-test
+t_test <- t.test(Shannon ~ urbanism, data = phy_shannon)
+
+# Print the p-value
+print(t_test$p.value)
+
+```
+```{r}
+ggplot(phy_shannon, aes(x=Shannon, group=urbanism, fill=urbanism)) +
+    geom_density(alpha=0.5) +
+    scale_fill_manual(values=c("#6FBD8B", "#7B2BC1")) +
+    scale_color_manual(values=c("#6FBD8B", "#7B2BC1")) +
+ # Add vertical lines for the mean
+  geom_vline(data = summary_stats, aes(xintercept = mean_shannon, color = urbanism), linetype = "solid") +
+  # Add vertical lines for the median
+  geom_vline(data = summary_stats, aes(xintercept = median_shannon, color = urbanism), linetype = "dashed") +
+  theme_linedraw()
+```
+Filter phy_shannon object
+```{r}
+meta2 <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
+  mutate(Batch = as.factor(Batch)) %>%
+  mutate(Total.Reads_scaled = scale(Total.Reads)[, 1])
+phy_shannon_filt <- phy_shannon %>%
+  left_join(meta2[,c("SampleName", "SampleID", "Batch", "Total.Reads")], by="SampleName") %>%
+  # This sample was bad quality 
+  dplyr::filter(!SampleID %in% c("GMCC1S1")) %>%
+  # These samples were outliers amongst the RNAseq
+  dplyr::filter(!SampleID %in% c("GMCC4S10", "GMCC3S7", "GMCC4C6", "GMCC5C5", "GMCC5C4", "GMCC5C3", "GMCC4S12")) %>% #NEW ADDITIONS AS OF NOV 2 2024 ARE GMCC4S12 AND GMCC3C1
+  # These samples were not used to treat the colonocytes
+  dplyr::filter(!SampleName %in% c("1127XT", "1462QI", "3364PX", "3553XK", "3606IJ", "9423WC"))
+```
+Order this by shannon and then partition into 5 groups
+```{r}
+phy_shannon5 <- phy_shannon_filt %>%
+  dplyr::select(Shannon, SampleID, SampleName) %>%
+  dplyr::arrange(Shannon) %>%
+  dplyr::mutate(group = ntile(Shannon, 5))
+
+shannon5 <- phy_shannon5 %>%
+  group_by(group) %>%
+  summarise(
+    median_shannon= median(Shannon),
+    sd_shannon <- sd(Shannon)
+  )
+
+# Split the data into a nested list based on the 'group' column
+shannon5_nested <- split(phy_shannon5, phy_shannon5$group)
+shannon5_nested <- lapply(shannon5_nested, dplyr::select, -group, -Shannon)
+
+# add controls
+control_rows <- meta2 %>% dplyr::filter(coculture=="control") %>% dplyr::select(SampleID, SampleName) 
+shannon5_nested <- lapply(shannon5_nested, rbind,control_rows) %>%
+  purrr::map(~ merge(.x, meta2[,c("SampleID","Batch", "urbanism", "Total.Reads_scaled")], by = "SampleID")) 
+shannon5_nested <- lapply(shannon5_nested, function(df) {
+  dplyr::mutate(df, coculture = dplyr::case_when(
+    is.na(df$urbanism) ~ "control", 
+    TRUE ~ "coculture"
+  ))
+})
+
+saveRDS(shannon5_nested, "results/rds/shannon5_nest.rds")
+write.csv(shannon5 , "results/docs/shannon5_list.csv")
+```
+
+
+Create 1000 groups of 15 samples with median shannon + sd
+```{r}
+set.seed(123)  # Set a seed for reproducibility
+
+# Create an empty dataframe to store results
+shannon1000 <- data.frame(
+  iteration = integer(),
+  median_shannon = numeric(),
+  sd_shannon = numeric(),
+  sample_ids = character(),
+  stringsAsFactors = FALSE
+)
+
+# Perform 1000 iterations
+for (i in 1:1000) {
+  # Randomly sample 15 rows from phy_shannon
+  sampled <- phy_shannon_filt[sample(nrow(phy_shannon_filt), 15), ]
+  
+  # Calculate median and standard deviation of Shannon
+  median_shannon <- median(sampled$Shannon)
+  sd_shannon <- sd(sampled$Shannon)
+  
+  # Get sample names as a semicolon-separated string
+  sample_ids <- paste(sampled$SampleID, collapse = ";")
+  
+  # Append results to the dataframe
+  shannon1000 <- rbind(shannon1000, data.frame(
+    iteration = i,
+    median_shannon = median_shannon,
+    sd_shannon = sd_shannon,
+    sample_ids = sample_ids,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# View results
+head(shannon1000)
+
+
+```
+Plot results
+```{r}
+shannon1000 <- shannon1000 %>%
+  dplyr::distinct(sample_ids, .keep_all = TRUE)
+
+ggplot(shannon1000, aes(x=median_shannon)) +
+  geom_histogram() 
+
+ggplot(shannon1000, aes(x=sd_shannon)) +
+  geom_histogram() 
+
+ggplot(shannon1000, aes(x=median_shannon, y=sd_shannon)) +
+  geom_point() 
+```
+Create 1000 groups of 15 samples with median shannon + sd
+Do this for urban and rural only
+```{r}
+set.seed(123)  # Set a seed for reproducibility
+
+# Create an empty dataframe to store results
+shannon1000_urban <- data.frame(
+  iteration = integer(),
+  median_shannon = numeric(),
+  sd_shannon = numeric(),
+  sample_ids = character(),
+  stringsAsFactors = FALSE
+)
+
+phy_shannon_filt_urban <- phy_shannon_filt %>%
+  dplyr::filter(urbanism=="urban")
+
+# Perform 1000 iterations
+for (i in 1:1000) {
+  # Randomly sample 15 rows from phy_shannon
+  sampled <- phy_shannon_filt_urban[sample(nrow(phy_shannon_filt_urban), 15), ]
+  
+  # Calculate median and standard deviation of Shannon
+  median_shannon <- median(sampled$Shannon)
+  sd_shannon <- sd(sampled$Shannon)
+  
+  # Get sample names as a semicolon-separated string
+  sample_ids <- paste(sampled$SampleID, collapse = ";")
+  
+  # Append results to the dataframe
+  shannon1000_urban <- rbind(shannon1000_urban, data.frame(
+    iteration = i,
+    median_shannon = median_shannon,
+    sd_shannon = sd_shannon,
+    sample_ids = sample_ids,
+    stringsAsFactors = FALSE
+  ))
+}
+
+```
+rural
+```{r}
+set.seed(123)  # Set a seed for reproducibility
+
+# Create an empty dataframe to store results
+shannon1000_rural <- data.frame(
+  iteration = integer(),
+  median_shannon = numeric(),
+  sd_shannon = numeric(),
+  sample_ids = character(),
+  stringsAsFactors = FALSE
+)
+
+phy_shannon_filt_rural <- phy_shannon_filt %>%
+  dplyr::filter(urbanism=="rural")
+
+# Perform 1000 iterations
+for (i in 1:1000) {
+  # Randomly sample 15 rows from phy_shannon
+  sampled <- phy_shannon_filt_rural[sample(nrow(phy_shannon_filt_rural), 15), ]
+  
+  # Calculate median and standard deviation of Shannon
+  median_shannon <- median(sampled$Shannon)
+  sd_shannon <- sd(sampled$Shannon)
+  
+  # Get sample names as a semicolon-separated string
+  sample_ids <- paste(sampled$SampleID, collapse = ";")
+  
+  # Append results to the dataframe
+  shannon1000_rural <- rbind(shannon1000_rural, data.frame(
+    iteration = i,
+    median_shannon = median_shannon,
+    sd_shannon = sd_shannon,
+    sample_ids = sample_ids,
+    stringsAsFactors = FALSE
+  ))
+}
+
+```
+
+Arrange by SD and slice
+```{r}
+shannon100 <- shannon1000 %>%
+  dplyr::arrange(sd_shannon) %>%
+  dplyr::slice_head(n = 100)
+
+set.seed(123)
+shannon100_random <- shannon1000 %>%
+  dplyr::slice_sample(n = 100)
+
+set.seed(123)
+shannon100_random_urban <- shannon1000_urban %>%
+  dplyr::slice_sample(n = 100)
+
+set.seed(123)
+shannon100_random_rural <- shannon1000_rural %>%
+  dplyr::slice_sample(n = 100)
+
+ggplot(shannon100, aes(x=median_shannon)) +
+  geom_histogram() 
+
+ggplot(shannon100, aes(x=sd_shannon)) +
+  geom_histogram() 
+
+```
+```{r}
+controls <- meta2 %>% dplyr::filter(coculture=="control") %>% dplyr::select(SampleID) %>%
+ unlist()
+
+shannon100_list <- shannon100 %>%
+  dplyr::mutate(controls = paste(controls, collapse = ";")) %>%
+  dplyr::mutate(iteration = paste0("i", iteration))
+
+shannon100_nest <- shannon100_list %>%
+  split(.$iteration) %>%  # Split the data by 'iteration'
+  purrr::set_names(names(.) %>% as.character())  %>%
+  purrr::map(~ .x %>%
+               # Convert the sample_ids and controls into long format (one sample per row)
+               dplyr::bind_rows(
+                 tibble(SampleID = unlist(strsplit(.x$sample_ids, ";")), coculture = "coculture"),
+                 tibble(SampleID = unlist(strsplit(.x$controls, ";")), coculture = "control")
+               ) %>%
+               # Remove any extra columns and keep only 'sample' and 'type'
+               dplyr::select(SampleID, coculture) %>%
+               # Filter out rows where sample is NA or empty
+               dplyr::filter(!is.na(sample) & SampleID != "")
+             ) %>%
+  purrr::map(~ merge(.x, meta2[,c("SampleID", "SampleName", "Batch", "urbanism", "Total.Reads_scaled")], by = "SampleID"))
+
+saveRDS(shannon100_nest, "results/rds/shannon100_nest.rds")
+write.csv(shannon100_list, "results/docs/shannon100_list.csv")
+  
+```
+random
+```{r}
+shannon100_random_list <- shannon100_random %>%
+  dplyr::mutate(controls = paste(controls, collapse = ";")) %>%
+  dplyr::mutate(iteration = paste0("i", iteration))
+
+shannon100_random_nest <- shannon100_random_list %>%
+  split(.$iteration) %>%  # Split the data by 'iteration'
+  purrr::set_names(names(.) %>% as.character())  %>%
+  purrr::map(~ .x %>%
+               # Convert the sample_ids and controls into long format (one sample per row)
+               dplyr::bind_rows(
+                 tibble(SampleID = unlist(strsplit(.x$sample_ids, ";")), coculture = "coculture"),
+                 tibble(SampleID = unlist(strsplit(.x$controls, ";")), coculture = "control")
+               ) %>%
+               # Remove any extra columns and keep only 'sample' and 'type'
+               dplyr::select(SampleID, coculture) %>%
+               # Filter out rows where sample is NA or empty
+               dplyr::filter(!is.na(sample) & SampleID != "")
+             ) %>%
+  purrr::map(~ merge(.x, meta2[,c("SampleID", "SampleName", "Batch", "urbanism", "Total.Reads_scaled")], by = "SampleID"))
+
+saveRDS(shannon100_random_nest, "results/rds/shannon100_random_nest.rds")
+write.csv(shannon100_random_list, "results/docs/shannon100_random_list.csv")
+```
+random urban
+```{r}
+shannon100_random_urban_list <- shannon100_random_urban %>%
+  dplyr::mutate(controls = paste(controls, collapse = ";")) %>%
+  dplyr::mutate(iteration = paste0("i", iteration))
+
+shannon100_random_urban_nest <- shannon100_random_urban_list %>%
+  split(.$iteration) %>%  # Split the data by 'iteration'
+  purrr::set_names(names(.) %>% as.character())  %>%
+  purrr::map(~ .x %>%
+               # Convert the sample_ids and controls into long format (one sample per row)
+               dplyr::bind_rows(
+                 tibble(SampleID = unlist(strsplit(.x$sample_ids, ";")), coculture = "coculture"),
+                 tibble(SampleID = unlist(strsplit(.x$controls, ";")), coculture = "control")
+               ) %>%
+               # Remove any extra columns and keep only 'sample' and 'type'
+               dplyr::select(SampleID, coculture) %>%
+               # Filter out rows where sample is NA or empty
+               dplyr::filter(!is.na(sample) & SampleID != "")
+             ) %>%
+  purrr::map(~ merge(.x, meta2[,c("SampleID", "SampleName", "Batch", "urbanism", "Total.Reads_scaled")], by = "SampleID"))
+
+saveRDS(shannon100_random_urban_nest, "results/rds/shannon100_random_urban_nest.rds")
+write.csv(shannon100_random_urban_list, "results/docs/shannon100_random_urban_list.csv")
+```
+random rural
+```{r}
+shannon100_random_rural_list <- shannon100_random_rural %>%
+  dplyr::mutate(controls = paste(controls, collapse = ";")) %>%
+  dplyr::mutate(iteration = paste0("i", iteration))
+
+shannon100_random_rural_nest <- shannon100_random_rural_list %>%
+  split(.$iteration) %>%  # Split the data by 'iteration'
+  purrr::set_names(names(.) %>% as.character())  %>%
+  purrr::map(~ .x %>%
+               # Convert the sample_ids and controls into long format (one sample per row)
+               dplyr::bind_rows(
+                 tibble(SampleID = unlist(strsplit(.x$sample_ids, ";")), coculture = "coculture"),
+                 tibble(SampleID = unlist(strsplit(.x$controls, ";")), coculture = "control")
+               ) %>%
+               # Remove any extra columns and keep only 'sample' and 'type'
+               dplyr::select(SampleID, coculture) %>%
+               # Filter out rows where sample is NA or empty
+               dplyr::filter(!is.na(sample) & SampleID != "")
+             ) %>%
+  purrr::map(~ merge(.x, meta2[,c("SampleID", "SampleName", "Batch", "urbanism", "Total.Reads_scaled")], by = "SampleID"))
+
+saveRDS(shannon100_random_rural_nest, "results/rds/shannon100_random_rural_nest.rds")
+write.csv(shannon100_random_rural_list, "results/docs/shannon100_random_rural_list.csv")
+```
+
+
+
+
+https://microbiome.github.io/tutorials/Betadiversity.html
+Divergence from group median
+```{r}
+library(microbiome)
+
+urban_phy <- subset_samples(phy, urbanism == "urban")
+b.urban <- divergence(urban_phy, apply(abundances(urban_phy), 1, median))
+names(b.urban) <- sample_names(urban_phy)
+
+rural_phy <- subset_samples(phy, urbanism == "rural")
+b.rural <- divergence(rural_phy, apply(abundances(rural_phy), 1, median))
+names(b.rural) <- sample_names(rural_phy)
+
+library(reshape2)
+l<- list("urban"=b.urban, "rural"=b.rural)
+df <- do.call(rbind, lapply(names(l), function(name) {
+  data.frame(
+    urbanism = name,                    # List name (urban or rural)
+    SampleID = names(l[[name]]),        # Names of the values (Sample IDs)
+    value = l[[name]]                   # Actual values
+  )
+}))
+
+p<- ggplot(df, aes(x = urbanism, y = value)) + geom_boxplot()+ xlab('')
+
+plot(p)
+
+mann_whitney_result <- wilcox.test(value ~ urbanism, data = df)
+Z <- mann_whitney_result$statistic  # This gives the W value
+n1 <- sum(df$urbanism == "urban")  # Number of samples in urban group
+n2 <- sum(df$urbanism == "rural")  # Number of samples in rural group
+N <- n1 + n2  # Total number of samples
+# Convert W to Z using the Mann-Whitney U test statistic
+Z_score <- qnorm(mann_whitney_result$p.value)  # Use qnorm to calculate the Z from p-value
+# Calculate effect size (r)
+r <- Z_score / sqrt(N)
+```
+
+```{r}
+# Load necessary libraries
+library(phyloseq)
+library(reshape2)
+library(ggplot2)
+
+# Define the function to apply the statistical test and calculate effect size
+calculate_stats <- function(phy, sample_size = 10) {
+  # Subset urban and rural phyloseq objects
+  urban_phy <- subset_samples(phy, urbanism == "urban")
+  rural_phy <- subset_samples(phy, urbanism == "rural")
+
+  # Randomly select 'sample_size' samples from each group
+ # set.seed(123)  # Set seed for reproducibility
+  urban_samples <- sample(sample_names(urban_phy), sample_size)
+  rural_samples <- sample(sample_names(rural_phy), sample_size)
+  
+  # Subset the phyloseq objects for the selected samples
+  urban_phy_subset <- prune_samples(urban_samples, urban_phy)
+  rural_phy_subset <- prune_samples(rural_samples, rural_phy)
+  
+  # Calculate the divergence for both subsets
+  b.urban <- divergence(urban_phy_subset, apply(abundances(urban_phy_subset), 1, median))
+  b.rural <- divergence(rural_phy_subset, apply(abundances(rural_phy_subset), 1, median))
+  
+  # Assign sample names to the values
+  names(b.urban) <- sample_names(urban_phy_subset)
+  names(b.rural) <- sample_names(rural_phy_subset)
+  
+  # Create a dataframe to store the results
+  l <- list("urban" = b.urban, "rural" = b.rural)
+  df <- do.call(rbind, lapply(names(l), function(name) {
+    data.frame(
+      urbanism = name,                     # List name (urban or rural)
+      SampleID = names(l[[name]]),         # Sample IDs
+      value = l[[name]]                    # Divergence values
+    )
+  }))
+  
+  # Perform Mann-Whitney U test
+  mann_whitney_result <- wilcox.test(value ~ urbanism, data = df)
+  p <- mann_whitney_result$p.value  
+  W <- mann_whitney_result$statistic  # The W statistic
+  n1 <- sum(df$urbanism == "urban")  # Number of urban samples
+  n2 <- sum(df$urbanism == "rural")  # Number of rural samples
+  N <- n1 + n2  # Total number of samples
+  
+  # Calculate the Z score (qnorm is used to approximate it from the p-value)
+  Z_score <- qnorm(mann_whitney_result$p.value)  
+  
+  # Calculate effect size (r)
+  r <- Z_score / sqrt(N)
+  
+  # Return the results as a data frame
+  result <- data.frame(
+    SampleID = paste(df$SampleID, collapse = ";"),  # Combine all Sample IDs with semicolon
+    mann_whitney_pval = p,  
+    effect_size_r = r           # Effect size (r)
+  )
+  
+  return(result)
+}
+
+# Step 3: Apply the function over 100 iterations and gather the results
+results_list <- vector("list", 100)  # List to store results
+for (i in 1:100) {
+  results_list[[i]] <- calculate_stats(phy, sample_size = 10)
+}
+
+# Combine the results into one data frame
+final_results <- do.call(rbind, results_list)
+
+
+```
+
+```{r}
+# Remove Inf values before processing
+filtered_results <- final_results %>%
+  filter(!is.infinite(effect_size_r))
+
+# Find the minimum and maximum values
+min_value <- min(filtered_results$effect_size_r)
+max_value <- max(filtered_results$effect_size_r)
+
+# Create a sequence of 8 equally spaced values between min and max
+uniform_values <- seq(min_value, max_value, length.out = 10)[2:9]  # exclude min and max themselves
+
+# Find the closest rows to each of the uniform values, taking only the first match
+uniform_rows <- lapply(uniform_values, function(val) {
+  closest_row <- filtered_results %>%
+    filter(abs(effect_size_r - val) == min(abs(effect_size_r - val))) %>%
+    slice(1)  # Take only the first row
+  return(closest_row)
+})
+
+# Combine the rows corresponding to the min, max, and uniform values
+final_results_select <- bind_rows(
+  filtered_results %>% filter(effect_size_r == min_value),   # Row with min value
+  filtered_results %>% filter(effect_size_r == max_value),   # Row with max value
+  do.call(bind_rows, uniform_rows)                           # Rows corresponding to uniform values
+)
+
+write.csv(final_results_select, "results/docs/divergence_10sets.csv")
+
+
+```
+```{r}
+ggplot(final_results, aes(x=effect_size_r)) +
+  geom_histogram() +
+  geom_vline(xintercept=-0.3790078, color="red") +
+   geom_vline(data = final_results_select, aes(xintercept = effect_size_r), color = "green")
+```
+
+
+Number of unique species per sample
+```{r}
+unique_species_per_sample <- apply(t(otu_table(phy_filt_s)), 1, function(x) sum(x > 20)) 
+unique_species_df <- data.frame(SampleName = names(unique_species_per_sample), 
+                                UniqueSpeciesCount = unique_species_per_sample) %>%
+  left_join(meta[,c("SampleName", "urbanism")])
+
+ggplot(unique_species_df, aes(x = SampleName, y = UniqueSpeciesCount, fill = urbanism)) +
+  geom_bar(stat = "identity") + 
+  #ylim(values=c(100,150)) +
+  facet_grid(~urbanism, space="free", scales="free") +
+  coord_cartesian(ylim = c(100, 140)) +
+  theme_linedraw()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 Make a list of the microbes we will look at downstream (if differentially abundant)
 ```{r}
@@ -488,7 +1247,7 @@ clr_filt_microbe_abundances <- clr_filt %>%
   t() %>%
   data.frame()
 
-write.csv(clr_filt_microbe_abundances, "results/docs/clr_filt_microbe_abundances.csv")
+#write.csv(clr_filt_microbe_abundances, "results/docs/clr_filt_microbe_abundances.csv")
 
 clr_filt_DA_microbe_abundances <- clr_filt_DA %>%
   t() %>%
@@ -499,45 +1258,28 @@ clr_filt_DA_microbe_abundances <- clr_filt_DA %>%
 
 ```{r}
 test <- clr_filt_microbe_abundances %>%
-  dplyr::select(Faecalibacterium,
-                     Faecalibacterium_sp_3,
-                     Bacteroides_ovatus,
-                     Bacteroides_caccae,
-                     Clostridiales,
-                     Lachnospiraceae,
-                     Spirochaetaceae,
-                     Treponema,
-                     Flavobacteriia,
-                     Flavobacteriaceae,
-                     Clostridiaceae,
-                     Clostridium,
-                     Akkermansiaceae,
-                     Akkermansia,
-                     Clostridiaceae,
-                     Clostridium,
-                     Erysipelotrichia,
-                     Erysipelotrichales,
-                     Enterobacter,
-                     Klebsiella,
-                     Anaerobutyricum,
-                     Klebsiella_pneumoniae,
-                     Veillonellaceae,
-                     Dialister_sp,
-                     Coprococcus,
-                     Coprococcus_sp,
-                     Lachnospiraceae_bacterium_GAM79,
-                     Bacteroides_finegoldii
+  dplyr::select(Roseburia_hominis,
+                Roseburia_sp_1,
+                Anaerovibrio_sp900548165,
+                Roseburia_faecis,
+                Dorea_sp,
+                Clostridium_sp_3,
+                Eubacterium_sp_5,
+                Ruminococcus_bicirculans,
+                Clostridium_Q_fessum,
+                Ruminococcus_sp_3,
+                Bacteroides_dorei
                 ) %>%
   rownames_to_column("SampleName") %>%
   pivot_longer(cols = -SampleName, names_to = "OTU", values_to = "CLR_abundance") %>%
   merge(meta[,c("SampleName", "urbanism")], by="SampleName")
 
-ggplot(filter(test, OTU=="Bacteroides_finegoldii"), aes(x=urbanism, y=CLR_abundance, fill=urbanism)) +
+ggplot(filter(test, OTU=="Bacteroides_dorei"), aes(x=urbanism, y=CLR_abundance, fill=urbanism)) +
   geom_boxplot() +
+  geom_point() +
   scale_fill_manual(values=c("#6FBD8B", "#7B2BC1")) + 
   theme_linedraw() + 
-  theme_linedraw() +
-  labs(x = "Bacteroides finegoldii", y = NULL) +  # Remove x and y axis titles
+  labs(x = "Bacteroides_dorei", y = NULL) +  # Remove x and y axis titles
   theme(
     legend.position = "none",  # Remove the legend
     axis.text.x = element_blank(),
@@ -545,7 +1287,7 @@ ggplot(filter(test, OTU=="Bacteroides_finegoldii"), aes(x=urbanism, y=CLR_abunda
     text = element_text(size = 12),
     axis.title.x = element_text(face = 'italic')
   )
-ggsave("results/figs/RNAseq-metaG-microbe-SparseCCA/Bacteroides_finegoldii.png", width=2, height=1.5)
+#ggsave("results/figs/RNAseq-metaG-microbe-SparseCCA/Lachnospiraceae_bacterium_GAM79.png", width=2, height=2)
 
 ```
 ```{r}
@@ -637,8 +1379,14 @@ species_clr_dist_urbanism <- ggplot(species_clr_dist_select, aes(x=Axis.1, y=urb
 #  theme_linedraw()
 
 ggarrange(species_clr_dist_pcoa, species_clr_dist_urbanism, ncol=1, align = "v", heights=c(0.7, 0.3))
-#ggsave("results/figs/metaG-PCoA/species.png", width=5, height=4)
+ggsave("results/figs/metaG-PCoA/species.png", width=5, height=4)
 ```
+```{r}
+wilcox.test(Axis.1 ~ urbanism, data = species_clr_dist_select)
+leveneTest(Axis.1 ~ urbanism, data = species_clr_dist_select)
+```
+
+
 Corrleation of PC vectors to metadata
 ```{r}
 total_reads <- as.data.frame((colSums(bracken_species_combined_num))) %>%
@@ -727,6 +1475,29 @@ genus_clr_dist_urbanism <- ggplot(genus_clr_dist_select, aes(x=Axis.1, y=urbanis
 ggarrange(genus_clr_dist_pcoa, genus_clr_dist_urbanism, ncol=1, align = "v", heights=c(0.7, 0.3))
 #ggsave("results/figs/metaG-PCoA/species.png", width=5, height=4)
 ```
+```{r}
+wilcox.test(Axis.1 ~ urbanism, data = genus_clr_dist_select)
+
+pc1_spread <- genus_clr_dist_select %>%
+  dplyr::select(urbanism, Axis.1) %>%
+  group_by(urbanism) %>%
+  summarize(
+    Mean = mean(Axis.1, na.rm = TRUE),
+    Median = median(Axis.1, na.rm = TRUE),
+    Variance = var(Axis.1, na.rm = TRUE),
+    SD = sd(Axis.1, na.rm = TRUE),
+    IQR = IQR(Axis.1, na.rm = TRUE), # Interquartile range
+    Range = max(Axis.1, na.rm = TRUE) - min(Axis.1, na.rm = TRUE),
+    Min = min(Axis.1, na.rm = TRUE),
+    Max = max(Axis.1, na.rm = TRUE)
+  )
+
+print(pc1_spread)
+
+library(car)
+leveneTest(Axis.1 ~ urbanism, data = genus_clr_dist_select)
+
+```
 
 Relative abundance transformations for plotting purposes.
 ```{r}
@@ -777,6 +1548,7 @@ g_plot <- ggplot(g_plot_df, aes(x=SampleName, y=Abundance, fill=Genus)) +
     "#2f94c6", # Prevotella
     "#277ba5", # Roseburia
     "#1f6284", # Ruminococcus
+    #"#1f4289",
     "darkgrey"# Other
   )) +
   facet_grid(~urbanism, scales="free", space="free", labeller = as_labeller(c(rural="Non-Industrialized", urban="Industrialized"))) +
@@ -798,7 +1570,67 @@ g_plot
 #ggsave("results/figs/metaG-stackedbar/genus.png", width=6.5, height=4)
 ```
 
+Just open biome
+```{r}
+g_plot_df_ob <- phy_r_filt_g %>%
+  psmelt() %>%
+  dplyr::filter(., str_detect(SampleName, "FMG")) %>%
+  dplyr::select(g, Abundance) %>%
+  group_by(g) %>%
+  summarize(median = median(Abundance)) %>%
+  left_join(psmelt(phy_r_filt_g), by = "g") %>%
+  dplyr::filter(., str_detect(SampleName, "FMG")) %>%
+  # Set threshold for "Other" coloring
+  mutate(Genus = case_when(median < 0.005 ~ paste0('zOther (', 0.005*100, '% or less)'),
+                             .default =g)) %>%
+  mutate(SampleName = as.factor(SampleName))
 
+# Sort according to bacteroides
+bac_sort_ob <- g_plot_df_ob %>%
+  subset(Genus == "Bacteroides") %>%
+  arrange(Abundance)
+g_plot_df_ob$SampleName <- factor(g_plot_df_ob$SampleName, levels = unlist(bac_sort_ob$SampleName))
+
+g_plot_ob <- ggplot(g_plot_df_ob, aes(x=SampleName, y=Abundance, fill=Genus)) + 
+  #geom_point(aes(x=SampleName, y= 1.02, color=shreya_samps)) +
+  #scale_color_manual(values=c("white", "red")) +
+  geom_bar(aes(), stat="identity", position="stack") +
+  scale_fill_manual(values=c(
+    "#e2711d", # Bacteroides
+    "#ff9100", # Blautia
+    "#ffaa00", # Clostridium
+    "#fee231", # Coprococcus
+    "#eeef20", # Dorea
+    "#c2cd4b", # Eubacterium
+    "#84ba63", # Faecalibacterium
+    "#4aa77c", # Oscillibacter
+    "#28947f", # Parabacteroides
+    "#2f94c6", # Prevotella
+    "#277ba5", # Roseburia
+    "#1f6284", # Ruminococcus
+    "magenta",
+    "purple",
+    "black",
+    #"#1f4289",
+    "darkgrey"# Other
+  )) +
+  #facet_grid(~urbanism, scales="free", space="free", labeller = #as_labeller(c(rural="Non-Industrialized", urban="Industrialized"))) +
+  theme(
+    panel.background = element_rect(fill = "transparent"), # bg of the panel
+    plot.background = element_rect(fill = "transparent", color = NA), # bg of the plot
+    panel.grid.major = element_blank(), # get rid of major grid
+    panel.grid.minor = element_blank(), # get rid of minor grid
+    legend.background = element_rect(fill = "transparent"), # get rid of legend bg 
+    legend.box.background = element_rect(fill = "transparent", color=NA), # get rid of legend panel bg and border
+    legend.text = element_text(face = "italic"),
+    #legend.position="bottom",
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.background =element_rect(fill=NA,))
+
+g_plot_ob
+```
 
 
 
@@ -856,7 +1688,36 @@ s_plot <- ggplot(s_plot_df, aes(x=SampleName, y=Abundance, fill=Species)) +
     strip.background =element_rect(fill=NA,)) 
 s_plot
 #ggsave("results/figs/metaG-stackedbar/species.png", width=6.5, height=4)
+write.csv(s_plot_df, file = "results/docs/s_plot_df.csv", row.names = FALSE)
 ```
+```{r}
+g_plot_df_cutoff <- g_plot_df %>%
+  mutate(Genus = case_when(median < 0.001 ~ paste0('zOther (', 0.001*100, '% or less)'),
+                             .default = g)) 
+length(unique(g_plot_df_cutoff$Genus))
+unique(g_plot_df_cutoff$Genus)
+
+genus001 <- as.list(unique(g_plot_df_cutoff$Genus))
+genus001 <- genus001[-1]
+
+# Write list to a text file (one way is to convert to a character vector)
+write.csv(data.frame(taxa=unlist(genus001)), file = "results/docs/genus001.csv", row.names = FALSE)
+
+```
+```{r}
+s_plot_df_cutoff <- s_plot_df %>%
+  mutate(Species = case_when(median < 0.001 ~ paste0('zOther (', 0.001*100, '% or less)'),
+                             .default = s)) 
+length(unique(s_plot_df_cutoff$Species))
+unique(s_plot_df_cutoff$Species)
+
+species001 <- as.list(unique(s_plot_df_cutoff$Species))
+species001 <- species001[-2]
+
+write.csv(data.frame(taxa=unlist(species001)), file = "results/docs/species001.csv", row.names = FALSE)
+```
+
+
 \
 Now let's prepare the data we will use to export and test in DESeq. We will save the taxa with (1) highest median abundance, (2) significant differential abundance in urban vs. rural, and (3) strongest associations with PC1-microbiome. \
 \

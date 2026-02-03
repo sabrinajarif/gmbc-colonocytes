@@ -353,17 +353,55 @@ meta <- meta %>%
   left_join(meta_qc, by="SampleID")
 write.csv(meta, "data/metadata/meta_RNAseq.csv")
 ```
+Read count metrics
+```{r}
+# Minimum # reads
+paste("min total:", min(meta_qc$Total.Reads))
+paste("min trim:", min(meta_qc$Trimmed.R1.Count))
+# Maximum # reads
+paste("max total:", max(meta_qc$Total.Reads))
+paste("max trim:", max(meta_qc$Trimmed.R1.Count))
+# Average # reads
+paste("avg total:", mean(meta_qc$Total.Reads))
+paste("avg trim:", mean(meta_qc$Trimmed.R1.Count))
+# Median # reads
+paste("median total:", median(meta_qc$Total.Reads))
+paste("median trim:", median(meta_qc$Trimmed.R1.Count))
+# Average alignment rate
+paste("avg align:", mean(meta_qc$Mapping.Rate))
+```
+After alignment, read counts ranged between 10,817,737 (15 million in sja) and 33,592,529 (56 million in sja) aligned reads per sample, with a mean of 17,142,585.72 (29 million in sja) and a median of 15,542,693.5 (27 million in sja) aligned reads per sample. Overall, the average alignment rate was ∼70% (89%) across samples
 
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 TECHNICAL METRICS PLOTTING
 
 Total reads (bar chart)
 ```{r}
-ggplot(meta, aes(x=SampleID, y=Total.Reads)) +
-  geom_bar(stat="identity") +
-  facet_wrap(~Batch, ncol=5, scales="free_x") +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+ggplot(meta, aes(x=reorder(SampleID, Total.Reads), y=Total.Reads)) +
+  geom_bar(stat="identity", fill="#b7094c") +
+  #facet_wrap(~Batch, ncol=5, scales="free_x") +
+  theme_linedraw() +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+ggsave("results/figs/RNAseq/totalreads_RNA.png", width=5, height=2.5)
+
 ```
+Mapping rate
+```{r}
+ggplot(meta, aes(x=reorder(SampleID, Mapping.Rate), y=Mapping.Rate)) +
+  geom_bar(stat="identity", fill="#b7094c") +
+  #facet_wrap(~Batch, ncol=5, scales="free_x") +
+  ylim(values=c(0,1)) +
+    theme_linedraw() +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+ggsave("results/figs/RNAseq/mappingrate_RNA.png", width=5, height=2.5)
+```
+
 Read quality
 ```{r}
 ggplot(meta, aes(x=SampleID, y=Average.Read.Quality, fill=Average.Read.Quality)) +
@@ -422,6 +460,11 @@ raw_read_cts_anno <- biomaRt::getBM(
   mart = ensembl)
 ```
 ```{r}
+length(innate_immune_genes)
+nrow(dplyr::filter(raw_read_cts_anno, ensembl_gene_id %in% innate_immune_genes))
+```
+
+```{r}
 # Filter by protein coding
 raw_read_cts_prtn <- raw_read_cts_anno %>%
   dplyr::filter(gene_biotype=="protein_coding") %>%
@@ -456,8 +499,8 @@ raw_read_cts_grp <- raw_read_cts_grp %>%
 
 # Keep genes which have 0 values in less than or equal to 50% control group samples OR 50% urban group samples OR 50% of rural group samples
 raw_read_cts_filt <- raw_read_cts_grp %>%
-  subset(perc0_coculture_ctrl <= 0.5 | perc0_coculture_microbiome <= 0.5) %>%
-  subset(perc0_urbanism_urban <= 0.5 | perc0_urbanism_rural <= 0.5) %>%
+  subset((perc0_coculture_ctrl <= 0.5 | perc0_coculture_microbiome <= 0.5)) %>%
+  subset((perc0_urbanism_urban <= 0.5 | perc0_urbanism_rural <= 0.5)) %>%
   dplyr::select(-(starts_with("perc0"))) %>%
   `row.names<-`(., NULL) %>%
   column_to_rownames("ensembl_gene_id") %>%
@@ -477,6 +520,10 @@ paste0("pre-filt: ", nrow(raw_read_cts_grp))
 paste0("post-filt: ", nrow(raw_read_cts_filt))
 paste0("post-filt: ", nrow(raw_read_cts_filt_alt))
 ```
+```{r}
+head(raw_read_cts_filt_alt)
+```
+
 Columns of all zeros create issues. Also, make sure continuous numeric columns are indeed numeric. Before, I had Total.Reads classified as a factor, meaning that every read was given its own column which obviously matched to only one sample, which produced a linear relationship which gave rise to the "not full rank" error.
 
 Lastly, make sure all NAs are actually NA

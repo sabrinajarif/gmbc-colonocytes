@@ -6,7 +6,24 @@ output: html_notebook
 ```{r}
 library(ggplot2)
 library(tidyverse)
+library(svglite)
 ```
+
+Load lasso all data (taxonomy)
+```{r}
+summary_ss_select_all <- read.csv("results/docs/summary_ss_select_all.csv", row.names = 1) %>% dplyr::mutate(model="all")
+library(data.table)
+summary_ss_select_urban <- fread("results/docs/summary_ss_select_urban.csv", select = 2:3) %>% dplyr::mutate(model="urban")
+summary_ss_select_rural <- read.csv("results/docs/summary_ss_select_rural.csv", row.names = 1) %>% dplyr::mutate(model="rural")
+```
+Load lasso all data (functions)
+```{r}
+summary_ss_select_all_function <- read.csv("results/docs/lasso/function/summary_ss_select_all.csv", row.names = 1) %>% dplyr::mutate(model="all")
+summary_ss_select_all_urban <- read.csv("results/docs/lasso/function/summary_ss_select_urban.csv", row.names = 1) %>% dplyr::mutate(model="urban")
+summary_ss_select_rural_function <- read.csv("results/docs/lasso/function/summary_ss_select_rural.csv", row.names = 1) %>% dplyr::mutate(model="rural")
+```
+
+
 
 Load metadata
 ```{r}
@@ -29,104 +46,1094 @@ row.names(meta) <- meta$SampleName
 meta <- meta[order(row.names(meta)), ]
 
 ```
-Load microbe abundances
+First, turn food and lifestyle to integers
 ```{r}
-clr_filt_microbe_abundances <- read.csv("results/docs/clr_filt_microbe_abundances.csv", row.names = 1)
-clr_filt_microbe_abundances <- clr_filt_microbe_abundances[order(row.names(clr_filt_microbe_abundances)), ]
+food_features <- setdiff(colnames(meta[, which(colnames(meta) == "Yogurt"):which(colnames(meta) == "SugarCandiesSweets")]), c("Manioc", "TaroMacabo", "SweetPotatoes", "Beets"))
+
+lifestyle_categorical <- c("lifestyle", "lifestyle2", "ethnicity", "urbanism", "lifestyle3")
+lifestyle_covariate <- c("age", "sex", "country", "PC1_w", "PC1_uw")
+
+lifestyle_features <- setdiff(colnames(meta[, which(colnames(meta) == "locality_density"):which(colnames(meta) == "food_intolerance")]), c("bmi", "bristol_stool_scale", lifestyle_categorical, lifestyle_covariate))
+  
+meta_int <- meta %>%
+  dplyr::select(food_features, lifestyle_features) %>%
+  #dplyr::mutate(across(all_of(lifestyle_categorical), ~ as.integer(as.factor(.)))) %>%
+  mutate_all(~as.numeric(str_extract(.x, "\\d+\\.?\\d*"))) 
+
+diet_int <- meta_int %>%
+  dplyr::select(food_features) %>%
+  #mutate(across(everything(), ~ scale(.))) %>%
+  select_if(~ var(.) > 0)
+
+diet_int_select <- diet_int %>%
+  select_if(~ var(.) > 1) %>%
+  rownames_to_column("SampleName")
+
+medication_int <- meta_int %>%
+  dplyr::select(c("antibiotic", "antiparasite", "oral_topical_medication")) %>%
+  #mutate(across(everything(), ~ scale(.))) %>%
+  select_if(~ var(.) > 0)
+
+blood_markers <- meta %>%
+  dplyr::select(c("calpro", "chromogranin", "igm", "iga")) %>%
+  mutate(across(everything(), as.numeric)) %>%
+  # zscores
+  mutate(across(everything(), ~ (. - mean(.)) / sd(.))) %>%
+  select_if(~ var(.) > 0) %>%
+  mutate(zscore_blood = rowSums(across(everything()), na.rm = TRUE))
+
+lifestyle_int <- meta_int %>%
+  dplyr::select(lifestyle_features) %>%
+  #mutate(across(everything(), ~ scale(.))) %>%
+  select_if(~ var(.) > 0)
 ```
 
-Here are some of the interesting lifestyle variables (measured in stool with the exception of PC which is mostly surveys):
-- PC1_uw, PC2_uw, PC1_w, PC2_w: I think this means weighted and unweighted PC values based on host lifestyle
-- calpro: calprotectin stool test. High levels of calprotectin = inflammation of intestines
-- chromogranin: protein associated with tumors and other disease conditions
-- igm and iga: antibodies secreted in response to infection
 
-Microbes of interest from Figure 3
+
+Subset diet_int by relevant categories
 ```{r}
-microbes_select <- clr_filt_microbe_abundances %>%
-  rownames_to_column("SampleName") %>%
-  dplyr::filter(SampleName %in% meta$SampleName) %>%
-  column_to_rownames("SampleName") %>%
-  select(c("Spirochaetes", "Spirochaetaceae", "Treponema",
-                     "Clostridia", "Clostridiales", "Lachnospiraceae",
-                     "Barnesiellaceae", "Odoribacter",
-                     "Bacteroidia", "Bacteroidales",
-                     "Lachnospira_eligens", "Eubacterium_sp_1",
-                     "Faecalibacterium","Faecalibacterium_sp_3"))
+diet_int_categories <- diet_int %>%
+  dplyr::mutate(Processed_Food = 
+                  rowSums(across(c(CaffeinatedSoda, IndusFruitJuice, IndustrializedCookie, ProcessedCereals, Pasta), ~ replace_na(.x, 0)))) %>%
+  dplyr::mutate(Mammal_Meat = 
+                  rowSums(across(c(AnimalFat, BirdMeat, MammalLivestockMeat), ~ replace_na(.x, 0)))) %>%
+  dplyr::mutate(Fish_Meat = 
+                  rowSums(across(c(FishMeat, Shellfish), ~ replace_na(.x, 0)))) %>%
+  dplyr::mutate(Legumes = 
+                  rowSums(across(c(Beans, Lentil), ~ replace_na(.x, 0)))) %>%
+  dplyr::mutate(Lactose = 
+                  rowSums(across(c(Milk, Yogurt, Cheese, IceCream), ~ replace_na(.x, 0)))) %>%
+  dplyr::mutate(Vegetables = 
+                  rowSums(across(c(Cauliflower, Cucumber, Potatoes, Carrots, SweetPepper, Yams, Okra, Corn, Cabbage, ChiliPepper), ~ replace_na(.x, 0)))) %>%
+    dplyr::mutate(Fruits = 
+                  rowSums(across(c(Banana, PlantainGreenBanana, Avocado, Guava, Oranges, Melon, Mangos, Pomes, Pineapple), ~ replace_na(.x, 0)))) %>%
+  dplyr::select(Processed_Food, Mammal_Meat, Fish_Meat, Legumes, Lactose, Vegetables, Fruits) %>%
+  rownames_to_column("SampleName")
 
 ```
 
+
+Blood as histogram
 ```{r}
-# Get the feature columns from meta_select (e.g., PC1_uw and 4 other features)
-features <- c("PC1_uw", "calpro", "chromogranin", "igm", "iga",
-              "water_source", "c_section", "breast_fed", "household_size", "animal_contact", "tobacco", "exercice_per_week")
+blood_markers_plot <- meta %>%
+  dplyr::select(c("calpro", "chromogranin", "igm", "iga")) %>%
+  rownames_to_column("SampleName")  %>%
+  pivot_longer(cols=-SampleName, names_to = "marker") %>%
+  mutate(value=as.numeric(value))
 
-meta_select <- meta %>%
-  select(features) %>%
-  mutate_all(~as.numeric(str_extract(.x, "\\d+\\.?\\d*")))  # Extract numeric values from each column
+ggplot(blood_markers_plot, aes(y = value, x=SampleName, fill = marker)) +
+  geom_bar(stat="identity") +
+  #geom_histogram(alpha = 0.7, position = "identity", bins = 15) + # Adjust bin size
+  facet_wrap(~marker, scales = "free_x", nrow=4) + # Allow different x-scales for each marker
+  theme_linedraw() +
+  labs(x = "Value",
+       y = "Count") +
+  scale_fill_manual(values=c("#b5838d", "#c81d25", "#f7a399", "#81171b")) +
+  theme(strip.text = element_blank())
 
-# Initialize a results list to store correlation coefficients and p-values
-results <- list(correlations = matrix(nrow = ncol(microbes_select), ncol = length(features)),
-                p_values = matrix(nrow = ncol(microbes_select), ncol = length(features)))
+#ggsave("results/figs/lifestyle/blood_markers_hist.png", width=3, height= 5)
+```
+Medication barplot
+```{r}
+medication_pres <- medication_int %>%
+  mutate(across(everything(), ~ ifelse(is.na(.) | . == 0, 0, 1))) %>%
+  rownames_to_column("SampleName")  %>%
+  pivot_longer(cols=-SampleName, names_to = "medication") 
 
-# Loop through each microbe column and each feature to calculate correlation
-for (i in 1:ncol(microbes_select)) {
-  microbe_data <- microbes_select[, i]
-  for (j in 1:length(features)) {
-    feature_data <- as.numeric(meta_select[[features[j]]])
-    cor_test <- cor.test(microbe_data, feature_data)
-    results$correlations[i, j] <- cor_test$estimate
-    results$p_values[i, j] <- cor_test$p.value
-  }
+ggplot(medication_pres, aes(x = factor(value), fill = medication)) +
+  geom_bar() +
+  theme_minimal() +
+  labs(title = "Distribution of Medication Presence (1) and Absence (0)",
+       x = "Value",
+       y = "Count",
+       fill = "Value") +
+  facet_wrap(~medication, scales = "free_x", nrow=3) + # Allow different x-scales for each marker
+  theme_linedraw() +
+  labs(x = "Value",
+       y = "Count") +
+  theme(strip.text = element_blank()) +
+  scale_fill_brewer(palette = "Set5")
+ggsave("results/figs/lifestyle/medication_hist.png", width=3.5, height= 4)
+```
+
+
+
+PCA of lifestyle and diet
+```{r}
+
+# pca function
+
+pca_func <- function(df) {
+  # Convert ordinal data to binary (1 if eat at least once, 0 otherwise)
+  binary_df <- df %>%
+    mutate(across(everything(), ~ ifelse(. > 1, 1, 0)))
+  
+  # Calculate the diversity score for each person (row)
+  diversity_scores <- rowSums(binary_df)
+  
+  # Perform PCA on the original data
+  pca_result <- prcomp(df, center = TRUE, scale. = TRUE)
+  
+  # Prepare PCA data
+  pca_data <- as.data.frame(pca_result$x)
+  pca_data$SampleName <- rownames(pca_data)  # Add sample names as a column if desired
+  pca_data$Diversity <- diversity_scores # Add diversity scores for coloring
+  pca_data <- pca_data %>%
+    merge(meta[,c("SampleName", "urbanism")], by="SampleName") %>%
+    column_to_rownames("SampleName")
+  
+  # Extract top features for the first two principal components
+  loadings <- pca_result$rotation
+  loadings_df <- as.data.frame(loadings)
+  loadings_df$Feature <- rownames(loadings_df)
+  
+  top_features_pc1 <- loadings_df %>%
+    arrange(desc(abs(PC1)))
+  
+  top_features_pc2 <- loadings_df %>%
+    arrange(desc(abs(PC2)))
+  
+  # Return the top features and the plot
+  return_list <- list(top_features_pc1, top_features_pc2, pca_data)
+  
+  return(return_list)
 }
 
-# Adjust p-values for multiple testing using Benjamini-Hochberg procedure
-# Flatten the p_values matrix to a vector for adjustment
-adjusted_p_values <- p.adjust(as.vector(results$p_values), method = "BH")
 
-# Reshape the adjusted p-values back to the original matrix shape
-adjusted_p_values <- matrix(adjusted_p_values, nrow = ncol(microbes_select), ncol = length(features))
+diet_pca <- ggplot(pca_func(diet_int)[[3]] , aes(x = PC1, y = PC2, fill = Diversity)) +
+    geom_point(size=3, shape=21) +
+    labs(title = "Diet", x = "Principal Component 1", y = "Principal Component 2") +
+    scale_fill_gradient(low = "white", high = "deepskyblue3") +
+    theme_linedraw() 
+diet_pca
+ggsave("results/figs/lifestyle/diet_pca.png", width=4, height=3)
 
-# Convert the results to a dataframe for better readability
-correlation_results <- data.frame(
-  Microbe = rep(colnames(microbes_select), times = length(features)),
-  Feature = rep(features, each = ncol(microbes_select)),
-  Correlation = as.vector(results$correlations),
-  P_Value = as.vector(results$p_values),
-  Adjusted_P_Value = as.vector(adjusted_p_values)
+diet_pc1_loadings <- pca_func(diet_int)[[1]]
+
+# add PC1 of diet to lifestyle data
+PC1_diet <- pca_func(diet_int)[[3]] %>% 
+  dplyr::select(PC1) %>%
+  dplyr::rename(PC1_diet = PC1) %>%
+  rownames_to_column("SampleName")
+
+lifestyle_int_diet <- lifestyle_int %>%
+  rownames_to_column("SampleName") %>%
+  merge(PC1_diet, by="SampleName") %>%
+  column_to_rownames("SampleName")
+
+lifestyle_pca <- ggplot(pca_func(lifestyle_int_diet)[[3]] , aes(x = PC1, y = PC2)) + #, color=urbanism
+    geom_point() +
+    labs(title = "Lifestyle", x = "Principal Component 1", y = "Principal Component 2") +
+    theme_linedraw() 
+lifestyle_pca
+ggsave("results/figs/lifestyle/lifestyle_pca.png", width=4, height=3)
+
+blood_markers_pca <- pca_func(dplyr::select(blood_markers, -zscore_blood))
+blood_markers_pca[[3]] <- blood_markers_pca[[3]] %>%
+  rownames_to_column(var = "SampleName") %>%
+  merge(blood_markers %>% rownames_to_column(var = "SampleName"), by = "SampleName") %>%
+  column_to_rownames(var = "SampleName")
+blood_markers_pca_plot <- ggplot(blood_markers_pca[[3]] , aes(x = PC1, y = PC2, fill=zscore_blood)) + #, color=urbanism
+    geom_point(size=3, shape=21) +
+    labs(title = "Blood Markers", x = "Principal Component 1", y = "Principal Component 2") +
+    scale_fill_gradient(low = "white", high = "firebrick3") +
+    theme_linedraw() 
+blood_markers_pca_plot
+ggsave("results/figs/lifestyle/blood_markers_pca.png", width=4, height=3)
+```
+```{r}
+pca_func(lifestyle_int_diet)[[1]]
+```
+Correlate the highly variable food features to diet pc1
+```{r}
+
+PC1_diet_cor <- PC1_diet %>%
+  left_join(diet_int_select, by="SampleName")
+```
+
+
+
+
+
+
+Does our PC1 correlate with groussin PC1?
+```{r}
+PC1_data <- pca_func(lifestyle_int_diet)[[3]] %>%
+  dplyr::select(PC1, PC2) %>%
+  rownames_to_column("SampleName") %>%
+  merge(meta[,c("SampleName", "PC1_w", "PC1_uw", "PC2_w", "PC2_uw")], by="SampleName") %>%
+  dplyr::mutate(across(c("PC1_w", "PC1_uw", "PC2_w", "PC2_uw"), as.numeric))
+
+ggplot(PC1_data, aes(x=PC1, y=PC1_w)) +
+  geom_point() +
+  geom_smooth(method=lm , color="red", fill="#69b3a2", se=TRUE)
+```
+
+
+
+Exports
+```{r}
+dietPC1 <- pca_func(lifestyle_int_diet)[[3]] %>%
+  rownames_to_column("SampleName")
+write_csv(dietPC1, "results/docs/dietPC1.csv")
+
+binary_diet <- diet_int %>%
+  mutate(across(everything(), ~ ifelse(. > 1, 1, 0))) %>%
+  mutate(diversity = rowSums(across(everything()))) %>%
+  rownames_to_column("SampleName")
+write_csv(binary_diet, "results/docs/binary_diet.csv")
+
+bloodPC1 <- pca_func(dplyr::select(blood_markers, -zscore_blood))[[3]] %>%
+  rownames_to_column("SampleName")
+write_csv(bloodPC1, "results/docs/bloodPC1.csv")
+
+blood_markers_unscaled <- meta %>%
+  dplyr::select(c("calpro", "chromogranin", "igm", "iga")) %>%
+  mutate(across(everything(), as.numeric)) %>%
+  rownames_to_column("SampleName")
+write_csv(blood_markers_unscaled, "results/docs/blood_markers_unscaled.csv")
+
+blood_markers_scaled <- blood_markers %>%
+  rownames_to_column("SampleName")
+write_csv(blood_markers_scaled, "results/docs/blood_markers_scaled.csv")
+
+binary_medication <- medication_int %>%
+  mutate(across(everything(), ~ ifelse(is.na(.) | . == 0, 0, 1))) %>%
+  rownames_to_column("SampleName")
+write_csv(binary_medication, "results/docs/binary_medication.csv")
+
+write_csv(PC1_data, "results/docs/lifestylePC1PC2.csv")
+ 
+```
+
+
+
+
+Observe as heatmap
+```{r}
+diet_int_select2 <- diet_int_select %>% column_to_rownames("SampleName")
+# Convert the matrix to binary
+diet_int_binary <- ifelse(diet_int_select2 > 1, 1, 0)
+
+# Calculate the total number of 1s per row
+diet_diversity <- rowSums(diet_int_binary)
+
+annotation_df <- meta %>%
+  cbind(diet_diversity) %>%
+  left_join(PC1_diet, by="SampleName") %>%
+  dplyr::mutate(PC1_diet_inv = (PC1_diet * -1)) %>%
+  #dplyr::select(urbanism, PC1) 
+  dplyr::select(SampleName, PC1_diet_inv, urbanism) %>%
+  column_to_rownames("SampleName") %>%
+  mutate(PC1_diet_inv = as.numeric(PC1_diet_inv)) 
+
+annotation_df <- annotation_df[rownames(diet_int_select2), , drop = FALSE] %>%
+  arrange(desc(PC1_diet_inv))
+
+library(pheatmap)
+
+library(RColorBrewer)
+  
+# Set up the color palette and breaks for the heatmap
+breaksList = seq(1, 5, by = 0.1)
+
+# Create the heatmap with annotation
+diet_heatmap <- pheatmap(diet_int_select2[rownames(annotation_df), ,drop = FALSE],
+           cluster_rows = F,    # Do not cluster rows
+           cluster_cols = T,     # Cluster columns
+           angle_col = 90,
+           color = colorRampPalette(brewer.pal(n = 5, name = "Blues"))(length(breaksList)),
+           breaks = breaksList,
+           fontsize_number = 0,
+           annotation_row = annotation_df,   
+          # annotation_col = annotation_col,
+           annotation_colors = list(
+             PC1_diet_inv = colorRampPalette(c("white", "black"))(length(diet_int_select2)),
+             #diet_diversity = colorRampPalette(c("white", "orange"))(length(diet_int_select2)),
+             urbanism = c("urban" = "#7B2BC1", "rural" = "#6FBD8B")
+             )
+           )
+png("results/figs/lifestyle/diet_heatmap.png", width = 1800, height = 700, res = 150)
+#svglite("results/figs/lifestyle/diet_heatmap.svg", width = 12, height = 3.5)
+diet_heatmap
+dev.off()
+
+#generate_heatmap(lifestyle_int)
+diet_row_order_names <- diet_heatmap$gtable$grobs[[5]]$label 
+```
+
+
+```{r}
+
+blood_markers_no_cumulative <- blood_markers %>% dplyr::select(-zscore_blood)
+
+annotation_df_blood <- blood_markers %>%
+  rownames_to_column("SampleName") %>%
+  left_join(meta[,c("SampleName", "urbanism")], by="SampleName") %>%
+    arrange(desc(zscore_blood)) %>%
+  dplyr::select(SampleName, urbanism) %>%
+  column_to_rownames("SampleName")
+
+
+blood_heatmap <- pheatmap(blood_markers_no_cumulative[rownames(annotation_df_blood), ,drop = FALSE], #
+           cluster_rows = F,    
+           cluster_cols = F,   
+           angle_col = 90,
+           color = colorRampPalette(brewer.pal(n = 9, name = "Reds"))(7/0.1),
+           breaks = seq(-2, 5, by = 0.1),
+           fontsize_number = 0,
+            annotation_row = annotation_df_blood,
+           annotation_colors = list(
+            # zscore_blood = colorRampPalette(c("white", "magenta"))(length(unique(blood_markers_no_cumulative))),
+             urbanism = c("urban" = "#7B2BC1", "rural" = "#6FBD8B")
+             )
+           )
+
+#svglite("results/figs/lifestyle/blood_heatmap.svg", width = 3, height = 3.5)
+png("results/figs/lifestyle/blood_heatmap.png", width = 600, height = 600, res = 150)
+blood_heatmap
+dev.off()
+
+#blood_row_order <- blood_heatmap$tree_row$order
+```
+```{r}
+medication_binary <- medication_int %>%
+  mutate(across(everything(), ~ ifelse(is.na(.) | . == 0, 0, 1)))
+
+# Calculate the total number of 1s per row
+med_diversity <- rowSums(medication_binary)
+
+annotation_df_med<- blood_markers %>%
+  cbind(med_diversity) %>%
+  rownames_to_column("SampleName") %>%
+  left_join(meta[,c("SampleName", "urbanism")], by="SampleName") %>%
+  dplyr::select(SampleName, urbanism, med_diversity) %>%
+  column_to_rownames("SampleName") %>%
+  arrange(desc(med_diversity))
+
+med_heatmap <- pheatmap(medication_binary[rownames(annotation_df_med), ,drop = FALSE],
+           cluster_rows = F,    # Do not cluster rows
+           cluster_cols = F,     # Cluster columns
+           angle_col = 90,
+           color = c("white", "darkolivegreen"),
+           #color = colorRampPalette(brewer.pal(n = 5, name = "Oranges"))(3/0.1),
+           #breaks = seq(0, 1, by = 1),
+           fontsize_number = 0,
+           annotation_row = annotation_df_med,
+           annotation_colors = list(
+             med_diversity = colorRampPalette(c("white", "blue"))(length((medication_int))),
+             urbanism = c("urban" = "#7B2BC1", "rural" = "#6FBD8B")
+             )
 )
-```
-```{r}
-correlation_results_sig <- correlation_results %>%
-  filter(P_Value < 0.05)
-```
-```{r}
-correlation_results <- correlation_results %>%
-  mutate(Log10_P_Value = -log10(P_Value)) %>%
-  mutate(Log10_P_Value_plot = ifelse(P_Value < 0.05, Log10_P_Value, NA)) %>%
-  mutate(component = case_when(Microbe %in% c("Faecalibacterium","Faecalibacterium_sp_3") ~"1a",
-                               Microbe %in% c("Bacteroidia", "Bacteroidales") ~ "1b/3b",
-                               Microbe %in% c("Spirochaetes", "Spirochaetaceae", "Treponema") ~ "2a",
-                               Microbe %in% c("Clostridia", "Clostridiales", "Lachnospiraceae") ~ "2b",
-                               Microbe %in% c("Barnesiellaceae", "Odoribacter") ~ "3a",
-                               Microbe %in% c("Lachnospira_eligens", "Eubacterium_sp_1") ~ "3c"))
-                            
 
-# Plot using ggplot2
-ggplot(correlation_results, aes(x = Microbe, y = Feature, fill = Correlation)) +
-  geom_tile(color = "white") +
-  scale_fill_gradient2(low = "#4cc9f0", mid = "white", high = "#f26419", midpoint = 0) +
-  geom_point(aes(size = Log10_P_Value_plot), shape = 21, color = "black", fill = "black") +
-  scale_size_continuous(range = c(1, 10)) +  # Adjust range as needed
-  theme_linedraw() +
-  facet_grid(~component, scales="free")+
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1, color = "black"),  # Angle and color x-axis text
-    axis.text.y = element_text(size = 10, color = "black"),  # Color y-axis text
-    strip.background = element_blank(),  # Remove facet panel background
-    strip.text = element_text(color = "black"),  # Make facet panel text black
-    panel.border = element_blank()  # Remove panel border
-  ) + 
-  labs(fill = "Correlation", size = "-log10(P-Value)") 
+#svglite("results/figs/lifestyle/med_heatmap.svg", width = 3, height = 3.5)
+png("results/figs/lifestyle/med_heatmap.png", width = 600, height = 600, res = 150)
+med_heatmap
+dev.off()
+
 ```
+
+
+
+
+
+--------------------------------------------------------------------------------
+Read in phy data (taxonomy)
+```{r}
+phy_filt_s <- read_rds("results/rds/phy_filt_s.rds")
+phy_filt_g <- read_rds("results/rds/phy_filt_g.rds")
+phy_filt_f <- read_rds("results/rds/phy_filt_f.rds")
+phy_filt_o <- read_rds("results/rds/phy_filt_o.rds")
+phy_filt_c <- read_rds("results/rds/phy_filt_c.rds")
+phy_filt_p <- read_rds("results/rds/phy_filt_p.rds")
+
+# Extract taxa names from the phyloseq objects
+phy_filt_s_taxa <- taxa_names(phy_filt_s)
+phy_filt_g_taxa <- taxa_names(phy_filt_g)
+```
+
+DELETE LATER
+```{r}
+library(microbiome)
+phy_filt_s_clr <- microbiome::transform(phy_filt_s, "clr")
+
+# Extract the OTU table as a matrix
+otu_table <- otu_table(phy_filt_s_clr)
+
+# Ensure row names or column names correspond to taxa
+# If taxa are in rows:
+bifido_counts <- as.data.frame(otu_table["Bacteroides_dorei", ]) %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("SampleName") %>%
+  left_join(blood_markers_scaled, by="SampleName") #%>%
+  #mutate(PC1_diet_inv = (PC1_diet*-1))
+
+ggplot(bifido_counts, aes(x=iga, y=Bacteroides_dorei)) +
+  geom_point(color="goldenrod") +
+  geom_smooth(method = "lm", color="black") +
+  labs(x = "IgA") +
+  #labs(x = "PC1 Diet", y="Phascolarctobacterium_A\nsp022718015") +
+  theme_linedraw()
+
+ggsave("results/figs/lifestyle/bac_iga.png", width=3, height=3)
+
+```
+```{r}
+library(ALDEx2)
+
+  diet_int_select3 <- diet_int_select2 %>% rownames_to_column("SampleName")
+  # Extract the sample data from the phyloseq object and merge with df
+  covariates <- phyloseq::sample_data(phy_filt_s) %>%
+    data.frame() %>%
+    merge(diet_int_select3[, c("SampleName", "Millet")], by = "SampleName") 
+
+  # Remove samples with missing diet data
+  phy_filt <- prune_samples(covariates$SampleName, phy_filt_s)
+
+  # Select the variables of interest and other covariates
+  covariates <- covariates %>%
+    dplyr::select(Millet.y, age, sex, country)
+
+  # Create model matrix
+  mm <- model.matrix(as.formula(paste("~Millet.y + country + age + sex")), covariates)
+  
+  x.glm <- aldex.clr(as.data.frame(otu_table(phy_filt)), mm, mc.samples = 128, denom = "all", verbose = TRUE)
+  glm.test <- aldex.glm(x.glm, mm)
+  glm.eff <- aldex.glm.effect(x.glm)
+  
+  glm <- cbind(glm.eff[1], glm.test) %>%
+    rename_with(~ str_replace_all(., ":", "_")) 
+  
+  glm_sig <- glm %>%
+    dplyr::filter(Millet.y_pval.holm < 0.1)
+```
+
+
+ALDEx2 for differential abundance testing. We will filter these a few steps later. Negative effect size indicates the microbe is primarily found in rural, positive effect size means urban.
+
+Explanation of output:
+* rab.all - median clr value for all samples in the feature
+* rab.win.NS - median clr value for the NS group of samples
+* rab.win.S - median clr value for the S group of samples
+* rab.X1_BNS.q50 - median expression value of features in sample X1_BNS if include.item.summary=TRUE
+* dif.btw - median difference in clr values between S and NS groups
+* dif.win - median of the largest difference in clr values within S and NS groups
+* effect - median effect size: diff.btw / max(diff.win) for all instances
+* overlap - proportion of effect size distribution that overlaps 0 (i.e. no effect)
+∗ we.ep - Expected p-value of Welch’s t-test, a posterior predictive p-value
+∗ we.eBH - Expected Benjamini-Hochberg corrected p-value of Welch’s t test
+∗ wi.ep - Expected p-value of Wilcoxon rank test
+∗ wi.eBH - Expected Benjamini-Hochberg corrected p-value of Wilcoxon test
+
+I believe the order of operations within aldex is this:
+1) Model data as dirichlet distribution
+2) Monte Carlo
+3) CLR transform
+4) Differential abundance testing
+
+
+Aldex glm, which allows us to control for covariates
+```{r}
+
+aldex_glm_func <- function(phy, df, var_interest, pval.holm, category, subcategory) {
+
+  # Extract the sample data from the phyloseq object and merge with df
+  covariates <- phyloseq::sample_data(phy) %>%
+    data.frame() %>%
+    merge(df[, c("SampleName", var_interest)], by = "SampleName") 
+
+  # Remove samples with missing diet data
+  phy_filt <- prune_samples(covariates$SampleName, phy)
+
+  # Select the variables of interest and other covariates
+  covariates <- covariates %>%
+    dplyr::select(all_of(var_interest), age, sex, country)
+
+  # Create model matrix
+  mm <- model.matrix(as.formula(paste("~", var_interest, "+ country + age + sex")), covariates)
+
+  # Perform ALDEx2 analysis
+  x.glm <- aldex.clr(as.data.frame(otu_table(phy_filt)), mm, mc.samples = 128, denom = "all", verbose = TRUE)
+  glm.test <- aldex.glm(x.glm, mm)
+  glm.eff <- aldex.glm.effect(x.glm)
+
+  # Combine results and add significance labels
+  glm <- cbind(glm.eff[1], glm.test) %>%
+    rename_with(~ str_replace_all(., ":", "_")) %>%
+    dplyr::mutate(sig = case_when({{pval.holm}} < 0.1 ~ "sig", TRUE ~ "ns")) %>%
+    dplyr::mutate(category = category) %>%
+    dplyr::mutate(subcategory = var_interest) %>%
+    rownames_to_column("taxa") %>%
+    dplyr::select(taxa,sig,category,subcategory,matches(var_interest)) %>%
+    rename_with(~ str_remove(., paste0(var_interest, "_")), matches(paste0("^", var_interest, "_")))
+
+  # Filter for significant results
+ # glm_sig <- glm %>%
+   # dplyr::filter({{pval.holm}} < 0.1)
+
+  return(glm)
+}
+
+
+```
+```{r}
+phy_filt_list <- list(
+  s = phy_filt_s,
+  g = phy_filt_g,
+  f = phy_filt_f,
+  o = phy_filt_o,
+  c = phy_filt_c,
+  p = phy_filt_p
+)
+
+summary_ss_select_all <- summary_ss_select_all %>%
+  dplyr::select(!genes)
+
+summary_ss_select_merged <- rbind(summary_ss_select_all, summary_ss_select_urban, summary_ss_select_rural) %>%
+  pivot_wider(
+    names_from = model,          # Use the values in the `model` column for new column names
+    values_from = num_genes,     # Use the `num_genes` column as the values in the new columns
+    values_fill = list(num_genes = 0)  # Replace NAs with 0
+  )
+
+```
+Diet
+```{#r, eval=F}
+library(ALDEx2)
+
+# diet
+glm_dietPC1_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], dietPC1, "PC1", PC1_pval.holm, "diet")
+})
+glm_dietProcessed_Food_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], diet_int_categories, "Processed_Food", Processed_Food_pval.holm, "diet")
+})
+glm_dietMammal_Meat_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], diet_int_categories, "Mammal_Meat", Mammal_Meat_pval.holm, "diet")
+})
+glm_dietFish_Meat_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], diet_int_categories, "Fish_Meat",Fish_Meat_pval.holm, "diet")
+})
+glm_dietLegumes_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], diet_int_categories, "Legumes", Legumes_pval.holm, "diet")
+})
+glm_dietLactose_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], diet_int_categories, "Lactose", Lactose_pval.holm, "diet")
+})
+glm_dietVegetables_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], diet_int_categories, "Vegetables", Vegetables_pval.holm, "diet")
+})
+glm_dietFruits_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], diet_int_categories, "Fruits", Fruits_pval.holm, "diet")
+})
+
+```
+```{#r, eval=F}
+# blood
+blood_markers_scaled_modified <- blood_markers_scaled %>% 
+  dplyr::rename_with(~ paste0(.x, "_scaled"), .cols = -SampleName)
+
+glm_bloodcalpro_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], blood_markers_scaled_modified, "calpro_scaled", calpro_scaled_pval.holm, "blood")
+})
+glm_bloodchromogranin_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], blood_markers_scaled_modified, "chromogranin_scaled", chromogranin_scaled_pval.holm, "blood")
+})
+glm_bloodigm_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], blood_markers_scaled_modified, "igm_scaled", igm_scaled_pval.holm, "blood")
+})
+glm_bloodiga_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], blood_markers_scaled_modified, "iga_scaled", iga_scaled_pval.holm, "blood")
+})
+glm_bloodzscore_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], blood_markers_scaled_modified, "zscore_blood_scaled", zscore_blood_scaled_pval.holm, "blood")
+})
+
+```
+```{#r, eval=F}
+# medication
+medication_int_modified <- medication_int %>% 
+  dplyr::mutate(across(everything(), ~ scale(.)[, 1])) %>%  
+  dplyr::mutate(medication_use = rowSums(across(everything()))) %>%  
+  dplyr::rename_with(~ paste0(.x, "_scaled")) %>%  
+  rownames_to_column("SampleName")  
+
+glm_medantibiotic_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], medication_int_modified, "antibiotic_scaled", antibiotic_scaled_pval.holm, "medication")
+})
+glm_medantiparasite_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], medication_int_modified, "antiparasite_scaled", antiparasite_scaled_pval.holm, "medication")
+})
+glm_medoral_topical_medication_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], medication_int_modified, "oral_topical_medication_scaled", oral_topical_medication_scaled_pval.holm, "medication")
+})
+glm_medmedication_use_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], medication_int_modified, "medication_use_scaled", medication_use_scaled_pval.holm, "medication")
+})
+```
+```{#r, eval=F}
+# lifestyle misc
+lifestyle_int_modified <- lifestyle_int %>% 
+  dplyr::mutate(across(everything(), ~ scale(.)[, 1])) %>%  
+  dplyr::rename_with(~ paste0(.x, "_scaled")) %>%  
+  rownames_to_column("SampleName")  
+
+glm_lifelatitude_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], lifestyle_int_modified, "latitude_scaled", latitude_scaled_pval.holm, "lifestyle")
+})
+
+glm_lifewater_source_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], lifestyle_int_modified, "water_source_scaled", water_source_scaled_pval.holm, "lifestyle")
+})
+
+glm_lifec_section_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], lifestyle_int_modified, "c_section_scaled", c_section_scaled_pval.holm, "lifestyle")
+})
+
+glm_lifebreast_fed_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], lifestyle_int_modified, "breast_fed_scaled", breast_fed_scaled_pval.holm, "lifestyle")
+})
+
+glm_lifehousehold_size_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], lifestyle_int_modified, "household_size_scaled", household_size_scaled_pval.holm, "lifestyle")
+})
+
+glm_lifeanimal_contact_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], lifestyle_int_modified, "animal_contact_scaled", animal_contact_scaled_pval.holm, "lifestyle")
+})
+
+glm_lifeexercice_per_week_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], lifestyle_int_modified, "exercice_per_week_scaled", exercice_per_week_scaled_pval.holm, "lifestyle")
+})
+
+glm_lifeaccess_to_electricity_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], lifestyle_int_modified, "access_to_electricity_scaled", access_to_electricity_scaled_pval.holm, "lifestyle")
+})
+
+glm_lifefloor_type_list <- lapply(names(phy_filt_list), function(level) {
+  aldex_glm_func(phy_filt_list[[level]], lifestyle_int_modified, "floor_type_scaled", floor_type_scaled_pval.holm, "lifestyle")
+})
+```
+```{#r}
+
+glm_list <- 
+  #diet
+  bind_rows(glm_dietPC1_list) %>%
+  rbind(bind_rows(glm_dietProcessed_Food_list)) %>%
+  rbind(bind_rows(glm_dietMammal_Meat_list)) %>%
+  rbind(bind_rows(glm_dietFish_Meat_list)) %>%
+  rbind(bind_rows(glm_dietLegumes_list)) %>%
+  rbind(bind_rows(glm_dietLactose_list))  %>%
+  rbind(bind_rows(glm_dietVegetables_list))  %>%
+  rbind(bind_rows(glm_dietFruits_list)) %>%
+  # blood
+  rbind(bind_rows(glm_bloodcalpro_list)) %>%
+  rbind(bind_rows(glm_bloodchromogranin_list)) %>%
+  rbind(bind_rows(glm_bloodigm_list)) %>%
+  rbind(bind_rows(glm_bloodiga_list)) %>%
+  rbind(bind_rows(glm_bloodzscore_list)) %>%
+  # medication
+  rbind(bind_rows(glm_medantibiotic_list)) %>%
+  rbind(bind_rows(glm_medantiparasite_list)) %>%
+  rbind(bind_rows(glm_medoral_topical_medication_list)) %>%
+  rbind(bind_rows(glm_medmedication_use_list)) %>%
+  # lifestyle
+  rbind(bind_rows(glm_lifelatitude_list)) %>%
+  rbind(bind_rows(glm_lifewater_source_list)) %>%
+  #rbind(bind_rows(glm_lifec_section_list)) %>%
+  #rbind(bind_rows(glm_lifebreast_fed_list)) %>%
+  rbind(bind_rows(glm_lifehousehold_size_list)) %>%
+  #rbind(bind_rows(glm_lifeanimal_contact_list)) %>%
+  rbind(bind_rows(glm_lifeexercice_per_week_list)) %>%
+  #rbind(bind_rows(glm_lifeaccess_to_electricity_list)) %>%
+  rbind(bind_rows(glm_lifefloor_type_list)) 
+
+#write.csv(glm_list, "results/docs/lifestyle_glmres.csv")
+```
+
+Plot
+```{r}
+glm_list <- read.csv("results/docs/lifestyle_glmres.csv")
+
+glm_res <- glm_list %>%
+  dplyr::filter(!subcategory=="floor_type_scaled") %>% # lots of results but non-intutitve
+  left_join(summary_ss_select_merged, by = "taxa") %>%
+  dplyr::filter(taxa %in% summary_ss_select_merged$taxa) %>%
+  dplyr::mutate(subcategory = case_when(subcategory=="PC1" ~ "Diet_PC1", 
+                                        T~subcategory)) %>%
+  dplyr::filter(all > 1) %>%
+  dplyr::mutate(Est_abs = abs(Est)) %>%
+  dplyr::mutate(Est_scaled = scale(Est_abs)) %>%
+  dplyr::mutate(dir = case_when(Est > 0 ~ "neg", TRUE ~ "pos")) %>% ######### I HAVE FLIPPED THIS
+  ############## ITS BECAUSE MY COEFICIENTS ARE OPPOSITE OF EXPECTED!!!##########
+########## AT LEAST FOR DIET PC1... I HAVENT CHECKED OTHERS###############
+######### I TRIPLE CHECKED BY PLOTTING CLR VALUES AGAINST DIET PC1#############
+######### I DONT HAVE TIME TO FIGURE OUT WHY.. I TRIED REPEATING EVERYTHING AND GOT DIFFERENT VALUES
+  dplyr::mutate(subcategory_lab = subcategory %>%
+      str_remove("_scaled") %>%              # 1. Remove "_scaled"
+      str_replace_all("_", " ") %>%          # 2. Replace underscores with spaces  
+      str_replace_all("\\biga\\b", "IgA") %>%# 4a. Replace "iga" with "IgA" (word boundary)
+      str_replace_all("\\bigm\\b", "IgM") %>%   # 4b. Replace "igm" with "IgM" (word boundary)
+      str_replace("^.", ~str_to_upper(.)) 
+  ) %>%
+  dplyr::mutate(taxa_lab = taxa %>%           
+      str_replace_all("_", " ")) %>%
+  dplyr::mutate(taxa_lab = if_else(
+      taxa %in% c(phy_filt_s_taxa, phy_filt_g_taxa),  # Check membership
+      paste0("italic('", taxa_lab, "')"),            # Create plotmath expression
+      paste0("'", taxa_lab, "'") ) 
+  ) 
+
+
+glm_res_summary <- glm_res %>%
+  dplyr::filter(sig == "sig") %>%
+  group_by(taxa_lab, all, urban, rural) %>% 
+  summarise(
+    num_features = n_distinct(subcategory),         
+    features = paste(unique(subcategory), collapse = ";") 
+  ) %>% 
+  dplyr::arrange(num_features)
+
+glm_res_summary$taxa_lab <- factor(glm_res_summary$taxa_lab, levels = unique(glm_res_summary$taxa_lab))
+glm_res$taxa_lab <- factor(glm_res$taxa_lab, levels = unique(glm_res_summary$taxa_lab))
+glm_res$category <- factor(glm_res$category, levels = c("diet", "medication", "lifestyle", "blood"))
+
+glm_res_filt <- glm_res %>%
+ dplyr::filter(subcategory %in% unlist(str_split(glm_res_summary$features, ";"))) %>%
+  dplyr::filter(!is.na(taxa_lab)) %>%
+  dplyr::mutate(taxa_lab = case_when(taxa == "Dorea sp" ~ "Dorea A longicatena B",
+                          taxa_lab == "Roseburia sp 1" ~ "RUG115 sp900066395",
+                          taxa_lab == "Clostridium sp 2" ~ "Bariatricus sp934320645",
+                          taxa_lab == "Coprococcus sp" ~ "Coprococcus eutactus A",
+                         T ~ taxa_lab))
+```
+```{r}
+glm_res_plot <- ggplot(glm_res_filt, aes(x=subcategory_lab, y=taxa_lab)) +
+  geom_point(shape=21, aes(fill=dir, size=as.numeric(Est_abs), alpha = ifelse(sig == "ns", 0, 1))) +
+  scale_fill_manual(values=c("skyblue", "tomato")) +
+  scale_alpha_identity() +
+  scale_y_discrete(labels = scales::label_parse()) +
+  facet_grid(~category, scales="free", space="free") +
+  theme_linedraw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        #axis.text.x = element_blank(),  
+        #axis.ticks.x = element_blank(),
+        strip.text = element_blank())  +
+  labs(x = NULL, y = NULL)
+ 
+lasso_all_numbers <- ggplot(glm_res_summary, aes(x = all, y = taxa_lab)) +
+  geom_bar(stat="identity", color="#353E43") +
+  theme_linedraw() +
+  theme(axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(),
+        panel.border = element_blank(),
+        axis.line.x = element_line(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) + 
+  labs(x = NULL, y = NULL) +
+  scale_x_continuous(breaks = range(glm_res_summary$all))
+
+
+library(patchwork)
+library(ggpubr)
+wrap_plots(
+  glm_res_plot, lasso_all_numbers, 
+  ncol = 2, 
+  widths = c(9, 1)  # First plot gets 90%, second composite gets 10%
+)
+
+#ggsave("results/figs/lifestyle/glm_res_plot.png", width=6, height=6)
+```
+
+
+
+-------------------------------------
+
+Read in count data (function). Non clr-transformed
+```{r}
+function_cts <- read.csv("results/docs/pathway_abundances_filt2.csv", row.names = 1) %>%
+  dplyr::rename(taxa = 1) %>%                     
+  dplyr::rename_with(~ gsub("^X", "", .)) %>%
+  # round to integers
+  dplyr::mutate(across(where(is.numeric), round))
+```
+Aldex glm for function. Input is df instead of phyloseq object
+```{r}
+aldex_glm_func_function <- function(cts, df, var_interest, pval.holm, category, subcategory) {
+
+  # Extract the sample data from the phyloseq object and merge with df
+  covariates <- meta %>%
+    merge(df[, c("SampleName", var_interest)], by = "SampleName") %>%
+    dplyr::mutate(
+    age = as.numeric(age)
+  )
+
+  # Remove samples with missing diet data
+  cts_filt <- cts %>%
+    dplyr::select(taxa, dplyr::any_of(covariates$SampleName)) %>%
+    column_to_rownames("taxa")
+
+  # Select the variables of interest and other covariates
+  covariates <- covariates %>%
+    dplyr::filter(SampleName %in% colnames(cts_filt)) %>%
+    dplyr::select(all_of(var_interest), age, sex, country)
+
+  # Create model matrix
+  mm <- model.matrix(as.formula(paste("~", var_interest, "+ country + age + sex")), covariates)
+
+  # Perform ALDEx2 analysis
+  x.glm <- aldex.clr(cts_filt, mm, mc.samples = 128, denom = "all", verbose = TRUE)
+  glm.test <- aldex.glm(x.glm, mm)
+  glm.eff <- aldex.glm.effect(x.glm)
+
+  # Combine results and add significance labels
+  glm <- cbind(glm.eff[1], glm.test) %>%
+    rename_with(~ str_replace_all(., ":", "_")) %>%
+    dplyr::mutate(sig = case_when({{pval.holm}} < 0.1 ~ "sig", TRUE ~ "ns")) %>%
+    dplyr::mutate(category = category) %>%
+    dplyr::mutate(subcategory = var_interest) %>%
+    rownames_to_column("taxa") %>%
+    dplyr::select(taxa,sig,category,subcategory,matches(var_interest)) %>%
+   rename_with(~ str_remove(., paste0(var_interest, "_")), matches(paste0("^", var_interest, "_")))
+
+  # Filter for significant results
+ # glm_sig <- glm %>%
+   # dplyr::filter({{pval.holm}} < 0.1)
+
+  return(glm)
+}
+
+
+```
+
+
+Apply
+Filter for functions present in lasso data to reduce # of tests
+```{r}
+function_cts_select <- function_cts %>%
+  dplyr::filter(taxa %in% summary_ss_select_all_function$taxa)
+```
+Diet
+```{#r}
+#pcs
+glm_dietPC1_function <- aldex_glm_func_function(function_cts_select, dietPC1, "PC1", PC1_pval.holm, "diet")
+glm_dietPC2_function <- aldex_glm_func_function(function_cts_select, dietPC1, "PC2", PC2_pval.holm, "diet")
+glm_dietPC3_function <- aldex_glm_func_function(function_cts_select, dietPC1, "PC3", PC3_pval.holm, "diet")
+glm_dietPC4_function <- aldex_glm_func_function(function_cts_select, dietPC1, "PC4", PC4_pval.holm, "diet")
+glm_dietPC5_function <- aldex_glm_func_function(function_cts_select, dietPC1, "PC5", PC5_pval.holm, "diet")
+
+# diet characterisitcs
+glm_Processed_Food_function <- aldex_glm_func_function(function_cts_select, diet_int_categories, "Processed_Food", Processed_Food_pval.holm, "diet")
+glm_Mammal_Meat_function <- aldex_glm_func_function(function_cts_select, diet_int_categories, "Mammal_Meat", Mammal_Meat_pval.holm, "diet")
+glm_Fish_Meat_function <- aldex_glm_func_function(function_cts_select, diet_int_categories, "Fish_Meat", Fish_Meat_pval.holm, "diet")
+glm_Legumes_function <- aldex_glm_func_function(function_cts_select, diet_int_categories, "Legumes", Legumes_pval.holm, "diet")
+glm_Lactose_function <- aldex_glm_func_function(function_cts_select, diet_int_categories, "Lactose", Lactose_pval.holm, "diet")
+glm_Vegetables_function <- aldex_glm_func_function(function_cts_select, diet_int_categories, "Vegetables", Vegetables_pval.holm, "diet")
+glm_Fruits_function <- aldex_glm_func_function(function_cts_select, diet_int_categories, "Fruits", Fruits_pval.holm, "diet")
+```
+Blood
+```{#r}
+glm_calpro_scaled_function <- aldex_glm_func_function(function_cts_select, blood_markers_scaled_modified, "calpro_scaled", calpro_scaled_pval.holm, "blood")
+glm_chromogranin_scaled_function <- aldex_glm_func_function(function_cts_select, blood_markers_scaled_modified, "chromogranin_scaled", chromogranin_scaled_pval.holm, "blood")
+glm_igm_scaled_function <- aldex_glm_func_function(function_cts_select, blood_markers_scaled_modified, "igm_scaled", igm_scaled_pval.holm, "blood")
+glm_iga_scaled_function <- aldex_glm_func_function(function_cts_select, blood_markers_scaled_modified, "iga_scaled", iga_scaled_pval.holm, "blood")
+glm_zscore_blood_scaled_function <- aldex_glm_func_function(function_cts_select, blood_markers_scaled_modified, "zscore_blood_scaled", zscore_blood_scaled_pval.holm, "blood")
+```
+Medication
+```{#r}
+glm_antibiotic_scaled_function <- aldex_glm_func_function(function_cts_select, medication_int_modified, "antibiotic_scaled", antibiotic_scaled_pval.holm, "medication")
+glm_antiparasite_scaled_function <- aldex_glm_func_function(function_cts_select, medication_int_modified, "antiparasite_scaled", antiparasite_scaled_pval.holm, "medication")
+glm_oral_topical_medication_scaled_function <- aldex_glm_func_function(function_cts_select, medication_int_modified, "oral_topical_medication_scaled", oral_topical_medication_scaled_pval.holm, "medication")
+glm_medication_use_scaled_function <- aldex_glm_func_function(function_cts_select, medication_int_modified, "medication_use_scaled", medication_use_scaled_pval.holm, "medication")
+```
+Lifestyle
+```{#r}
+glm_locality_density_scaled_function <- aldex_glm_func_function(function_cts_select, lifestyle_int_modified, "locality_density_scaled", locality_density_scaled_pval.holm, "lifestyle")
+
+glm_latitude_scaled_function <- aldex_glm_func_function(function_cts_select, lifestyle_int_modified, "latitude_scaled", latitude_scaled_pval.holm, "lifestyle")
+
+glm_water_source_scaled_function <- aldex_glm_func_function(function_cts_select, lifestyle_int_modified, "water_source_scaled", water_source_scaled_pval.holm, "lifestyle")
+
+glm_household_size_scaled_function <- aldex_glm_func_function(function_cts_select, lifestyle_int_modified, "household_size_scaled", household_size_scaled_pval.holm, "lifestyle")
+
+glm_animal_contact_scaled_function <- aldex_glm_func_function(function_cts_select, lifestyle_int_modified, "animal_contact_scaled", animal_contact_scaled_pval.holm, "lifestyle")
+
+glm_exercice_per_week_scaled_function <- aldex_glm_func_function(function_cts_select, lifestyle_int_modified, "exercice_per_week_scaled", exercice_per_week_scaled_pval.holm, "lifestyle")
+
+glm_access_to_electricity_scaled_function <- aldex_glm_func_function(function_cts_select, lifestyle_int_modified, "access_to_electricity_scaled", access_to_electricity_scaled_pval.holm, "lifestyle")
+```
+
+
+
+```{#r}
+glm_list_function <- rbind(#diet
+                           glm_dietPC1_function,
+                           glm_dietPC2_function,
+                           glm_dietPC3_function,
+                           glm_dietPC4_function,
+                           glm_dietPC5_function,
+                           glm_Processed_Food_function,
+                           glm_Mammal_Meat_function,
+                           glm_Fish_Meat_function,
+                           glm_Legumes_function,
+                           glm_Lactose_function,
+                           glm_Vegetables_function,
+                           glm_Fruits_function,
+                           #blood
+                           glm_calpro_scaled_function,
+                           glm_chromogranin_scaled_function,
+                           glm_igm_scaled_function,
+                           glm_iga_scaled_function,
+                           glm_zscore_blood_scaled_function,
+                           # medication
+                           glm_antibiotic_scaled_function,
+                           glm_antiparasite_scaled_function,
+                           glm_oral_topical_medication_scaled_function,
+                           glm_medication_use_scaled_function,
+                           # lifestyle
+                           glm_locality_density_scaled_function,
+                           glm_latitude_scaled_function,
+                           glm_water_source_scaled_function,
+                           glm_household_size_scaled_function,
+                           #glm_animal_contact_scaled_function,
+                           glm_exercice_per_week_scaled_function)#,
+                           #glm_access_to_electricity_scaled_function) 
+
+write.csv(glm_list_function, "results/docs/lifestyle_glmres_function.csv")
+```
+```{r}
+glm_list_function <- read.csv("results/docs/lifestyle_glmres_function.csv")
+```
+
+Plot
+```{r}
+glm_res_function <- glm_list_function %>%
+  dplyr::filter(!subcategory=="floor_type_scaled") %>% # lots of results but non-intutitve
+  left_join(summary_ss_select_all_function, by = "taxa") %>%
+  dplyr::filter(taxa %in% summary_ss_select_all_function$taxa) %>%
+  dplyr::mutate(subcategory = case_when(subcategory=="PC1" ~ "Diet_PC1", 
+                                        T~subcategory)) %>%
+  #dplyr::filter(all > 1) %>%
+  dplyr::mutate(Est_abs = abs(Est)) %>%
+  dplyr::mutate(Est_scaled = scale(Est_abs)) %>%
+  dplyr::mutate(dir = case_when(Est > 0 ~ "pos", TRUE ~ "neg")) %>%
+  dplyr::mutate(subcategory_lab = subcategory %>%
+      str_remove("_scaled") %>%              # 1. Remove "_scaled"
+      str_replace_all("_", " ") %>%          # 2. Replace underscores with spaces  
+      str_replace_all("\\biga\\b", "IgA") %>%# 4a. Replace "iga" with "IgA" (word boundary)
+      str_replace_all("\\bigm\\b", "IgM") %>%   # 4b. Replace "igm" with "IgM" (word boundary)
+      str_replace("^.", ~str_to_upper(.)) 
+  ) %>%
+  dplyr::mutate(taxa_lab = taxa %>%           
+      str_replace_all("_", " ") %>%
+      str_remove("^mc.*?PWY\\s*\\d*\\s*") %>%
+      # Capitalize the first letter (without decapitalizing others)
+      str_replace("^.", ~str_to_upper(.)) %>%
+      # Shorten "biosynthesis" to "bsynth."
+      str_replace_all("biosynthesis", "bsyn.") %>%
+      # Shorten "degradation" to "deg."
+      str_replace_all("degradation", "deg.")
+  ) %>%
+  # remove functions that are non-bacterial
+  dplyr::filter(!taxa_lab %in% c("All trans farnesol bsyn.", 
+                             "L ornithine bsyn. II",
+                             "L arginine bsyn. IV  archaebacteria" 
+) )
+
+glm_res_summary_function <- glm_res_function %>%
+  dplyr::filter(sig == "sig") %>%
+  group_by(taxa_lab, num_genes) %>% 
+  summarise(
+    num_features = n_distinct(subcategory),         
+    features = paste(unique(subcategory), collapse = ";") 
+  ) %>% 
+  dplyr::arrange(num_features)
+
+glm_res_summary_function$taxa_lab <- factor(glm_res_summary_function$taxa_lab, levels = unique(glm_res_summary_function$taxa_lab))
+glm_res_function$taxa_lab <- factor(glm_res_function$taxa_lab, levels = unique(glm_res_summary_function$taxa_lab))
+glm_res_function$category <- factor(glm_res_function$category, levels = c("diet", "medication", "lifestyle", "blood"))
+
+glm_res_filt_function <- glm_res_function %>%
+ dplyr::filter(subcategory %in% unlist(str_split(glm_res_summary_function$features, ";"))) %>%
+  dplyr::filter(!is.na(taxa_lab)) 
+
+```
+```{r}
+glm_res_plot_function <- ggplot(glm_res_filt_function, aes(x=subcategory_lab, y=taxa_lab)) +
+  geom_point(shape=21, aes(fill=dir, size=as.numeric(Est_abs), alpha = ifelse(sig == "ns", 0, 1))) +
+  scale_fill_manual(values=c("tomato", "skyblue")) +
+  scale_alpha_identity() +
+  #scale_y_discrete(labels = scales::label_parse()) +
+  facet_grid(~category, scales="free", space="free") +
+  theme_linedraw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        #axis.text.x = element_blank(),  
+        #axis.ticks.x = element_blank(),
+        strip.text = element_blank())  +
+  labs(x = NULL, y = NULL)
+
+ 
+lasso_all_numbers_function <- ggplot(glm_res_summary_function, aes(x = num_genes, y = taxa_lab)) +
+  geom_bar(stat="identity", color="#353E43") +
+  theme_linedraw() +
+  theme(axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(),
+        panel.border = element_blank(),
+        axis.line.x = element_line(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) + 
+  labs(x = NULL, y = NULL) +
+  scale_x_continuous(breaks = range(glm_res_summary_function$num_genes))
+
+library(patchwork)
+library(ggpubr)
+wrap_plots(
+  glm_res_plot_function, lasso_all_numbers_function, 
+  ncol = 2,
+  widths = c(9, 1)
+)
+
+#ggsave("results/figs/lifestyle/glm_res_plot_function.png", width=9, height=3)
+```
+```{r}
+library(microbiome)
+phy_filt_s_clr <- microbiome::transform(phy_filt_s, "clr")
+
+library(compositions)
+
+lifestyle_int2 <- lifestyle_int %>% rownames_to_column("SampleName")
+
+# Extract the OTU table as a matrix
+#otu_table <- otu_table(phy_filt_s_clr_function)
+
+# Ensure row names or column names correspond to taxa
+# If taxa are in rows:
+bifido_counts <- function_cts_select %>%
+  column_to_rownames("taxa") %>%
+  as.matrix() %>%
+  clr() %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("SampleName") %>%
+  #dplyr::select(mc_PWY_7328__superpathway_of_UDP_glucose_derived_O_antigen_building_blocks_biosynthesis, SampleName) %>%
+  left_join(blood_markers_unscaled, by="SampleName")# %>%
+ # mutate(PC1_diet_inv = (PC1_diet*-1))
+
+ggplot(bifido_counts, aes(x=iga, y=mc_PWY_7328__superpathway_of_UDP_glucose_derived_O_antigen_building_blocks_biosynthesis)) +
+#ggplot(bifido_counts, aes(x=as.character(locality_density), y=mc_FERMENTATION_PWY__mixed_acid_fermentation)) +
+  #geom_boxplot(color="black") +
+  geom_point(color="goldenrod") +
+  geom_smooth(method = "lm", color="black") +
+  #labs(x = "IgA", y="Superpathway of UDP glucose derived\nO antigen building blocks biosynthesis
+#") +
+  #labs(x = "PC1 Diet", y="Phascolarctobacterium_A\nsp022718015") +
+  theme_linedraw()
+
+ggsave("results/figs/lifestyle/udp_iga.png", width=3, height=3)
+
+```
+
 

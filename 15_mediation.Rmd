@@ -1,0 +1,66 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+perform_selection <- function(A, B, C_function, p_value_threshold = 0.5) {
+  # Initialize an empty set W
+  W <- list()
+  
+  # Initialize the vector of contributed information and p-values
+  C_values <- numeric(length(A))
+  p_values <- rep(1, length(A))
+  
+  # Step 5: Repeat until all variables are in W
+  while (length(W) < length(A)) {
+    # Step 2: Evaluate Contributed Information C_i = C(A_i, B, W)
+    for (i in setdiff(seq_along(A), W)) {
+      C_values[i] <- C_function(A[[i]], B, W)
+    }
+    
+    # Step 3: Solve k = argmax_i(C_i)
+    k <- which.max(C_values)
+    
+    # Step 4: Move variable A_k into set W
+    W <- c(W, k)
+  }
+  
+  # Step 6-9: Grubb's Test and significance test
+  while (length(W) > 2) {
+    # Recalculate contributed information for all variables in W
+    C_in_W <- C_values[W]
+    
+    # Step 6: Find the largest Contributed Information
+    k <- W[which.max(C_in_W)]
+    C_k <- C_values[k]
+    
+    # Step 7: Calculate Grubb’s Test Statistic
+    G <- (C_k - mean(C_in_W)) / sd(C_in_W)
+    
+    # Step 8: Perform significance test
+    df <- length(C_in_W) - 2
+    t_critical <- qt(0.975, df) # Two-tailed t-test
+    p_value <- 2 * (1 - pt(G, df))
+    
+    p_values[k] <- p_value
+    
+    # Stop if p-value is above the threshold or 2 or fewer variables remain
+    if (p_value > p_value_threshold || length(W) <= 2) break
+    
+    # Step 9: Remove C_k
+    W <- setdiff(W, k)
+  }
+  
+  # Step 11: Set remaining p-values to 1
+  p_values[W] <- 1
+  
+  # Step 12: Apply FDR correction on p-values
+  p_adjusted <- p.adjust(p_values, method = "fdr")
+  
+  return(list(selected_variables = W, adjusted_p_values = p_adjusted))
+}
+
+```
+
+

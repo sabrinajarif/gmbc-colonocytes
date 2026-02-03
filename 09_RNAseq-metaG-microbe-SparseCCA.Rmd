@@ -188,7 +188,7 @@ bestpenaltyY <- 0.07 #MICROBES # DECENT RESULTS
 #bestpenaltyY <- bestPenalty[2]
 ```
 ```{r}
-#bestPenalty_rural <- tune_params_grid_search(genes_rural,microbes_rural)
+bestPenalty_rural <- tune_params_grid_search(genes_rural,microbes_rural)
 #bestpenaltyX_rural <- bestPenalty_rural[1]
 #bestpenaltyY_rural <- bestPenalty_rural[2]
 ```
@@ -262,6 +262,10 @@ CCA_padj_all <- p.adjust(CCA_pval_all, method = "BH")
 CCA_padj_urban <- p.adjust(CCA_pval_urban, method = "BH")
 CCA_padj_rural <- p.adjust(CCA_pval_rural, method = "BH")
 ```
+```{r}
+CCA_padj_rural
+```
+
 Step 5. Output significant components
 ```{r}
 sig_cutoff <- 0.1 

@@ -1,0 +1,1625 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(biomaRt)
+library(clusterProfiler)
+library(ReactomePA)
+library(glmnet)
+library(hdi)
+library(stabs)
+library(DESeq2)
+library(limma)
+```
+
+```{r}
+## In Rstudio, find the path to the directory where the current script is located.
+## If not using Rstudio, current_dir should point to your working directory for this demo.
+current_dir <- dirname(rstudioapi::getSourceEditorContext()$path)
+```
+```{r}
+meta <- read.csv(paste0(current_dir,"/data/metadata/meta_RNAseq.csv"), row.names = 1) %>%
+  # Batch as character
+  mutate(Batch = as.character(Batch)) %>%
+  # exclude controls
+  dplyr::filter(!Luca_Lab_ID=="control") %>%
+  # This sample was bad quality 
+  dplyr::filter(!SampleID %in% c("GMCC1S1")) %>%
+  # These samples were outliers amongst the RNAseq
+  dplyr::filter(!SampleID %in% c("GMCC4S10", "GMCC3S7", "GMCC4C6", "GMCC5C5", "GMCC5C4", "GMCC5C3")) %>%
+  # These samples were not used to treat the colonocytes
+  dplyr::filter(!SampleName %in% c("1127XT", "1462QI", "3364PX", "3553XK", "3606IJ", "9423WC")) %>%
+  # These samples did not have metagenomic sequencing data
+  dplyr::filter(!SampleID %in% c("GMCC1S6", "GMCC2S3", "GMCC4S7")) %>%
+  # This sample is missing from function data
+  dplyr::filter(!SampleID =="GMCC5S12") %>%
+  mutate(rn = SampleID) %>%
+  column_to_rownames("rn") 
+  #dplyr::filter(!SampleName=="4342XH")
+meta <- meta[order(row.names(meta)), ]
+
+meta_urban <- meta %>% dplyr::filter(urbanism=="urban")
+meta_urban <- meta_urban[order(row.names(meta_urban)), ]
+
+meta_rural <- meta %>% dplyr::filter(urbanism=="rural")
+meta_rural <- meta_rural[order(row.names(meta_rural)), ]
+
+```
+```{r}
+## load gene expression data
+# samples are rows, genes are columns
+#genes <- load_gene_expr(paste0(current_dir,"/input/gene_expresion_demo_sp_CCA.txt"))
+genes <- read.csv(paste0(current_dir,"/results/docs/raw_read_cts_filt.csv"), row.names = 1)
+genes <- genes[, colnames(genes) %in% meta$SampleID] 
+genes <- genes[, !colnames(genes) %in% "GMCC5S12"] #this sample is missing from function data
+genes <- genes[, order(colnames(genes))] %>% t() %>% as.matrix()
+```
+```{r}
+genes_urban <- genes[rownames(genes) %in% meta_urban$SampleID, ]
+genes_urban <- genes_urban[order(rownames(genes_urban)),]
+
+genes_rural <- genes[rownames(genes) %in% meta_rural$SampleID, ]
+genes_rural <- genes_rural[order(rownames(genes_rural)),]
+```
+Perform batch correction
+```{r}
+genes_bc <- removeBatchEffect(t(genes), c(meta$Batch)) 
+```
+Apply variance stabilizing transformation from DESeq2
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = t(genes), 
+                              colData = meta, 
+                              design = ~ 1) 
+
+# Normalize the counts
+dds <- estimateSizeFactors(dds)
+normalized_counts <- counts(dds, normalized=TRUE)
+
+vsd <- vst(dds, blind = FALSE)
+
+normalized_counts_bc <- removeBatchEffect(normalized_counts, c(meta$Batch)) 
+# set negative values to 0
+normalized_counts_bc[normalized_counts_bc < 0] <- 0
+# round the values to the nearest integer
+normalized_counts_bc <- round(normalized_counts_bc)
+
+
+dds_bc <- DESeqDataSetFromMatrix(countData = normalized_counts_bc, 
+                                 colData = meta, 
+                                 design = ~ 1)
+
+vsd_bc <- vst(dds_bc, blind = FALSE)
+vsd_mat <- assay(vsd_bc)
+
+# Filter out genes with low variance using 25% quantile as cut-off for each disease cohort
+# Assuming 'meta' contains a column 'disease_cohort' that specifies the disease cohort for each sample
+# Adjust the column name 'disease_cohort' to the actual column name in your metadata
+
+filtered_genes_list <- lapply(unique(meta$urbanism), function(cohort) {
+  # Subset the transformed matrix and metadata for the current cohort
+  cohort_samples <- meta %>% dplyr::filter(urbanism == cohort) %>% rownames()
+  cohort_vsd_mat <- vsd_mat[, cohort_samples]
+  
+  # Calculate variance for each gene in the current cohort
+  gene_variances <- apply(cohort_vsd_mat, 1, var)
+  
+  # Determine the 25% quantile of variance
+  variance_cutoff <- quantile(gene_variances, 0.25)
+  
+  # Filter genes with variance above the 25% quantile
+  filtered_genes <- rownames(cohort_vsd_mat)[gene_variances > variance_cutoff]
+  
+  return(filtered_genes)
+})
+
+# Combine the filtered gene lists from each cohort
+filtered_genes <- unique(unlist(filtered_genes_list))
+
+# Subset the transformed matrix to include only the filtered genes
+genes_bc_vst_varfilt <- vsd_mat[filtered_genes, ]
+
+# Check the dimensions of the filtered matrix
+dim(genes_bc_vst_varfilt)
+
+genes_bc_vst_varfilt <- t(genes_bc_vst_varfilt)
+```
+```{r}
+plotPCA(vsd, intgroup = "Batch")
+plotPCA(vsd_bc, intgroup = "Batch")
+```
+```{r}
+genes_urban <- genes_bc_vst_varfilt[rownames(genes_bc_vst_varfilt) %in% meta_urban$SampleID, ]
+genes_urban <- genes_urban[order(rownames(genes_urban)),]
+
+genes_rural <- genes_bc_vst_varfilt[rownames(genes_bc_vst_varfilt) %in% meta_rural$SampleID, ]
+genes_rural <- genes_rural[order(rownames(genes_rural)),]
+```
+
+
+
+```{r}
+## load microbiome data
+# samples are rows, individual taxa are columns
+# column names are like this: 
+# Bacteria;Bacteroidetes;Bacteroidia;Bacteroidales;Prevotellaceae
+
+pathways <- read.csv(paste0(current_dir,"/results/docs/clr_filt_function_abundances.csv"), check.names=F, row.names = 1) %>%
+  t() %>%
+  as.data.frame() 
+pathways <- pathways %>%
+  dplyr::mutate(SampleName = row.names(pathways)) %>%
+  left_join(meta[c("SampleName", "SampleID")],by="SampleName") %>%
+  dplyr::filter(SampleID %in% meta$SampleID) %>%
+  dplyr::select(-SampleName) %>%
+  column_to_rownames("SampleID") %>%
+  as.matrix()
+pathways <- pathways[order(rownames(pathways)),] 
+
+pathways_urban <- pathways[rownames(pathways) %in% meta_urban$SampleID, ]
+pathways_urban <- pathways_urban[order(rownames(pathways_urban)),]
+
+pathways_rural <- pathways[rownames(pathways) %in% meta_rural$SampleID, ]
+pathways_rural <- pathways_rural[order(rownames(pathways_rural)),]
+
+## Ensure same samples in both genes and microbes data
+stopifnot(all(rownames(genes) == rownames(pathways)))
+setdiff(rownames(genes), rownames(pathways))
+```
+
+
+Combine covariates with microbes
+```{r}
+covariates <- meta %>%
+  dplyr::select(SampleName, SampleID, country, age, sex)
+covariates <- covariates[order(rownames(covariates)),] 
+
+# Impute missing values for USA samples
+# I IMPUTED THESE IN THE 02 MARKDOWN DOC BASED ON MICROBIOME PCS 1-5
+imputed_samples <- data.frame(
+  SampleName = c("FMG110", "FMG111", "FMG112", "FMG28", "FMG65"),
+  age = c(29,59,39,29,39),
+  sex= c("F","M","F","M","M")
+)
+
+covariates_imputed <- covariates
+rownames(covariates_imputed) <- NULL
+
+covariates_imputed$age[covariates_imputed$SampleName %in% imputed_samples$SampleName] <- imputed_samples$age
+covariates_imputed$age <- as.numeric(covariates_imputed$age)
+covariates_imputed$sex[covariates_imputed$SampleName %in% imputed_samples$SampleName] <- imputed_samples$sex
+
+# Convert categorical variables to factors
+covariates_imputed <- covariates_imputed %>%
+  dplyr::select(-SampleName) %>%
+  mutate(country = factor(country),
+         sex = factor(sex)) %>%
+  column_to_rownames("SampleID")
+
+# Dummy encode the factors using model.matrix
+covariates_imputed_ohe <- as.data.frame(model.matrix(~ country + sex - 1, data = covariates_imputed))
+
+# Filter for urban and rural
+covariates_imputed_ohe_urban <- pathways[rownames(covariates_imputed_ohe) %in% meta_urban$SampleID, ]
+covariates_imputed_ohe_rural <- pathways[rownames(covariates_imputed_ohe) %in% meta_rural$SampleID, ]
+
+# Join with microbe matrix
+pathways_covariates <- cbind(pathways, covariates_imputed_ohe) %>% as.matrix()
+pathways_covariates_urban <- cbind(pathways_urban, covariates_imputed_ohe_urban) %>% as.matrix()
+pathways_covariates_rural <- cbind(pathways_rural, covariates_imputed_ohe_rural) %>% as.matrix()
+
+## Ensure same samples in both genes and microbes data
+stopifnot(all(rownames(genes) == rownames(pathways_covariates)))
+```
+
+
+```{r}
+#y <- genes_bc_vst_varfilt #genes_bc #response
+#x <- pathways_covariates #microbes_covariates #predictors
+
+#y <- genes_urban #genes_bc_vst_varfilt #response
+#x <- pathways_covariates_urban #microbes_covariates #predictors
+
+y <- genes_rural #genes_bc_vst_varfilt #response
+x <- pathways_covariates_rural #microbes_covariates #predictors
+
+x.uniq <- unique(x, MARGIN = 2)
+dim(x.uniq)
+x <- x.uniq
+
+print(paste0("# genes = ",dim(y)[2]))
+
+print(paste0("# pathways = ",dim(x)[2]))
+```
+
+
+
+```{r}
+############### Functions ############
+
+estimate.sigma <- function(x, y_i, bestlambda, tol) {
+  
+  lasso.fit = glmnet(x,y_i,alpha = 1)
+  # beta <- coef(lasso.fit, s = bestlambda)[-1] ## This gives coefficients of fitted model, not predicted coeff. 
+  # try(if(length(which(abs(beta) > tol)) > n) stop(" selected predictors more than number of samples! Abort function"))
+  
+  y = as.vector(y_i)
+  yhat = as.vector(predict(lasso.fit, newx = x, s = bestlambda))
+  beta = predict(lasso.fit,s=bestlambda, type="coef") ## predicted coefficients
+  df = sum(abs(beta) > tol) ## Number of non-zero coeff. Floating-point precision/tolerance used instead of checking !=0
+  n = length(y_i)
+  ss_res = sum((y - yhat)^2)
+  
+  if((n-df-1) >= 1) {
+    sigma = sqrt(ss_res / (n-df-1)) ## note, if we get rid of intercept when extracting beta, so should be drop -1?
+    sigma.flag = 0
+  } else{
+    
+    sigmas <- numeric()
+    ## Repeat 5x and take median of finite values else assign sigma to ss_res and raise the flag 
+    for( j in 1:5){
+      bestlambda = get.lambda(x, y_i, 10, 10)
+      lasso.fit = glmnet(x,y_i,alpha = 1)
+      y = as.vector(y_i)
+      yhat = as.vector(predict(lasso.fit, newx = x, s = bestlambda))
+      beta = predict(lasso.fit,s=bestlambda, type="coef") ## predicted coefficients
+      df = sum(abs(beta) > tol) ## Number of non-zero coeff. Floating-point precision/tolerance used instead of checking !=0
+      n = length(y_i)
+      ss_res = sum((y - yhat)^2)
+      if((n-df-1) >= 1) {
+        sigmas[j] = sqrt(ss_res / (n-df-1)) ## note, if we get rid of intercept when extracting beta, so should be drop -1?
+      }
+    }
+    if(length(sigmas != 0 )){
+      
+      sigma = median(sigmas, na.rm = T)
+      sigma.flag = 1
+    } else{
+      sigma = 1 ## conservative option
+      # sigma = ss_res ## lenient option
+      sigma.flag = 2
+    }
+    
+  }
+  
+  return(list(sigmahat = sigma, sigmaflag = sigma.flag, betahat = beta)) ## we return beta to be used later in hdi function.
+  
+}
+
+## Inspired from the details for estimateSigma() function in selectiveInference package: https://cran.r-project.org/web/packages/selectiveInference/selectiveInference.pdf
+estimate.sigma.loocv <- function(x, y_i, bestlambda, tol) {
+  
+  lasso.fit = glmnet(x,y_i,alpha = 1)
+  # beta <- coef(lasso.fit, s = bestlambda)[-1] ## This gives coefficients of fitted model, not predicted coeff. 
+  # try(if(length(which(abs(beta) > tol)) > n) stop(" selected predictors more than number of samples! Abort function"))
+  
+  y = as.vector(y_i)
+  yhat = as.vector(predict(lasso.fit, newx = x, s = bestlambda))
+  beta = predict(lasso.fit,s=bestlambda, type="coef") ## predicted coefficients
+  df = sum(abs(beta) > tol) ## Number of non-zero coeff. Floating-point precision/tolerance used instead of checking !=0
+  n = length(y_i)
+  ss_res = sum((y - yhat)^2)
+  
+  if((n-df-1) >= 1) {
+    sigma = sqrt(ss_res / (n-df-1)) ## note, if we get rid of intercept when extracting beta, so should be drop -1?
+    sigma.flag = 0
+  } else{
+      sigma = 1 ## conservative option
+      # sigma = ss_res ## lenient option
+      sigma.flag = 2
+    }
+    
+  
+  return(list(sigmahat = sigma, sigmaflag = sigma.flag, betahat = beta)) ## we return beta to be used later in hdi function.
+  
+}
+
+
+fit.cv.lasso <- function(x, y_i, kfold, repeats){
+  
+  lambdas = NULL
+  r.sqr.final <- numeric()
+  r.sqr.final.adj <- numeric()
+  r.sqr.CV.test <- numeric()
+  lasso.cv.list <- list()
+  
+  for (i in 1:repeats){
+    
+      ## glmnet CV
+      fit <- cv.glmnet(x, y_i, alpha=1, nfolds=kfold, type.measure = "mse", keep =TRUE, grouped=FALSE)  
+      errors = data.frame(fit$lambda,fit$cvm)
+      lambdas <- rbind(lambdas,errors)
+      
+      ## Get R^2 of final model
+      r.sqr.final[i] <- r_squared(as.vector(y_i), 
+                                  as.vector(predict(fit$glmnet.fit, 
+                                                    newx = x, s = fit$lambda.min)))
+      ## Get adjusted R^2
+      r.sqr.final.adj[i] <- adj_r_squared(r.sqr.final[i], n = nrow(x), 
+                                          p = sum(as.vector(coef(fit$glmnet.fit, 
+                                                                 s = fit$lambda.min)) > 0))
+      
+  }
+  
+  # take mean cvm for each lambda
+  lambdas <- aggregate(lambdas[, 2], list(lambdas$fit.lambda), mean)
+  # dim(lambdas)
+  # select the best one
+  bestindex = which(lambdas[2]==min(lambdas[2]))
+  bestlambda = lambdas[bestindex,1]
+  
+  return(list(bestlambda = bestlambda, r.sqr = median(r.sqr.final), 
+              r.sqr.adj = median(r.sqr.final.adj)
+              ))
+}
+
+## functions to compute R2
+## Adapted from https://rpubs.com/kaz_yos/alasso
+r_squared <- function(y, yhat) {
+  ybar <- mean(y)
+  ## Total SS
+  ss_tot <- sum((y - ybar)^2)
+  ## Residual SS
+  ss_res <- sum((y - yhat)^2)
+  ## R^2 = 1 - ss_res/ ss_tot
+  1 - (ss_res / ss_tot)
+}
+## Function for Adjusted R^2
+## n sample size, p number of prameters
+adj_r_squared <- function(r_squared, n, p) {
+  1 - (1 - r_squared) * (n - 1) / (n - p - 1)
+}
+
+############### Estimate sigma (standard deviation of the error term or noise) ###############
+
+estimate.sigma.fit.hdi <- function(x, y, gene_name){
+  ## Import all the libraries for the current node/core on MSI 
+  check.packages <- function(pkg){
+    new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+    if (length(new.pkg)) 
+      install.packages(new.pkg, dependencies = TRUE, repos = "http://cran.us.r-project.org")
+    sapply(pkg, require, character.only = TRUE)
+  }
+  
+  packages <- c("glmnet","hdi","methods","doParallel") ## package methods is not loaded by default by RScript on MSI 
+  check.packages(packages)
+  
+  print(paste0("Processing gene:", gene_name));flush.console()
+  
+  ## Extract the expression for this gene (response variable)
+  y_i <- y[,grep(paste0("^",gene_name,"$"),colnames(y))]
+  
+  ## Make sure y_i is numeric before model fitting 
+  #stopifnot(class(y_i) == "numeric") SABRINA REMOVED THIS BC VALUES ARE INTEGERS
+  
+  ## Fit lasso CV model
+  fit.model <- fit.cv.lasso(x, y_i,  kfold = length(y_i), repeats = 1)
+  bestlambda <- fit.model$bestlambda
+  r.sqr <- fit.model$r.sqr
+  r.sqr.adj <- fit.model$r.sqr.adj
+ 
+  ## Estimate sigma using the estimated lambda param
+  sigma.myfun <- estimate.sigma.loocv(x, y_i, bestlambda, tol=1e-4)
+  sigma <- sigma.myfun$sigmahat
+  beta <- as.vector(sigma.myfun$betahat)[-1]
+  sigma.flag <- sigma.myfun$sigmaflag
+  
+  ## Inference 
+  lasso.proj.fit <- lasso.proj(x, y_i, multiplecorr.method = "BH", betainit = beta, sigma = sigma, suppress.grouptesting = T)
+  lasso.ci <- as.data.frame(confint(lasso.proj.fit, level = 0.95))
+  lasso.FDR.df <- data.frame(gene = rep(gene_name, length(lasso.proj.fit$pval)), 
+                             taxa = names(lasso.proj.fit$pval.corr), 
+                             r.sqr = r.sqr, r.sqr.adj = r.sqr.adj,
+                             pval = lasso.proj.fit$pval, padj = lasso.proj.fit$pval.corr, 
+                             ci.lower = lasso.ci$lower, ci.upper = lasso.ci$upper,
+                             sigma = sigma, sigma.flag = sigma.flag,
+                             row.names=NULL)
+  
+ 
+  return(lasso.FDR.df)
+  
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Save everything as a big R object so we can run on midway
+```{r}
+input.genes.list <- colnames(y)
+
+lasso_obj_test <- list( 
+  # functions
+  estimate.sigma,
+  estimate.sigma.loocv,
+  fit.cv.lasso,
+  r_squared,
+  adj_r_squared,
+  estimate.sigma.fit.hdi,
+  # variables
+  #y[,1:10],
+  #x[,1:10],
+  y,
+  x,
+  #input.genes.list[1:10]
+  input.genes.list
+  )
+names(lasso_obj_test) <- c(  # functions
+  "estimate.sigma",
+  "estimate.sigma.loocv",
+  "fit.cv.lasso",
+  "r_squared",
+  "adj_r_squared",
+  "estimate.sigma.fit.hdi",
+  # variables
+  "y",
+  "x",
+  "input.genes.list")
+
+#saveRDS(lasso_obj_test, "data/for_hpc/function/lasso_obj_all.rds")
+#saveRDS(lasso_obj_test, "data/for_hpc/function/lasso_obj_urban.rds")
+saveRDS(lasso_obj_test, "data/for_hpc/function/lasso_obj_rural.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+Import after running lasso and stability selection.
+```{r}
+# lasso results
+lasso_urban <- read.table("results/docs/lasso/function/lasso_hdi_urban_func.txt")
+lasso_rural <- read.table("results/docs/lasso/function/lasso_hdi_rural_func.txt")
+
+# stability selection
+ss_urban <- read.table("results/docs/lasso/function/stabs_stabsel_output_urban.txt")
+ss_rural <- read.table("results/docs/lasso/function/stabs_stabsel_output_rural.txt")
+
+ss_all <- read.table("results/docs/lasso/function/stabs_stabsel_output_all.txt")
+```
+
+
+```{r}
+
+lasso_urban <- lasso_urban %>%
+  mutate(beta_est = (ci.lower + ci.upper) / 2)
+lasso_rural <- lasso_rural %>%
+  mutate(beta_est = (ci.lower + ci.upper) / 2)
+```
+
+```{r}
+head(lasso_urban)
+```
+```{r}
+ss_overlap <- function(lasso_df, ss_df) {
+  ss_select <- ss_df %>% 
+  dplyr::filter(!taxa.selected=="None") %>% 
+  dplyr::rename("gene" = "gene_name") %>% 
+  dplyr::rename("taxa" = "taxa.selected")
+overlap <- merge(lasso_df, ss_select, by = c("gene","taxa")) %>%
+  dplyr::filter(!taxa %in% c("sexM", 
+                         "sexF", 
+                         "countryGhana",
+                         "countryRwanda",
+                         "countryNigeria",
+                         "countryMalaysia",
+                         "countryUSA" )) %>%
+  mutate(gene_taxa = paste(gene, taxa, sep=":")) %>%
+  dplyr::filter(padj < 0.1)
+return(overlap)
+}
+
+ss_select_urban <- ss_overlap(lasso_urban, ss_urban)
+ss_select_rural <- ss_overlap(lasso_rural, ss_rural)
+
+nrow(ss_select_urban)
+nrow(ss_select_rural)
+```
+Cheating because my lasso code for all failed
+```{r}
+ss_select_all <- ss_all %>%
+  dplyr::filter(!taxa.selected == "None") %>% 
+  dplyr::rename("gene" = "gene_name") %>% 
+  dplyr::rename("taxa" = "taxa.selected") %>%
+  dplyr::filter(!taxa %in% c("sexM", 
+                         "sexF", 
+                         "countryGhana",
+                         "countryRwanda",
+                         "countryNigeria",
+                         "countryMalaysia",
+                         "countryUSA" ))
+
+summary_ss_select_all <- ss_select_all %>%
+  group_by(taxa) %>%
+  summarize(num_genes = n()) %>%
+  arrange(desc(num_genes))
+#write.csv(summary_ss_select_all, "results/docs/lasso/function/summary_ss_select_all.csv")
+```
+
+```{r}
+
+summary_ss_select_urban <- ss_select_urban %>%
+  group_by(taxa) %>%
+  summarize(num_genes = n()) %>%
+  arrange(desc(num_genes))
+write.csv(summary_ss_select_urban, "results/docs/lasso/function/summary_ss_select_urban.csv")
+
+genesummary_ss_select_urban <- ss_select_urban %>%
+  group_by(gene) %>%
+  summarize(num_taxa = n()) %>%
+  arrange(desc(num_taxa))
+
+summary_ss_select_rural <- ss_select_rural %>%
+  group_by(taxa) %>%
+  summarize(num_genes = n()) %>%
+  arrange(desc(num_genes))
+write.csv(summary_ss_select_rural, "results/docs/lasso/function/summary_ss_select_rural.csv")
+
+genesummary_ss_select_rural <- ss_select_rural %>%
+  group_by(gene) %>%
+  summarize(num_taxa = n()) %>%
+  arrange(desc(num_taxa))
+
+union_sigtaxa <- unique(c(summary_ss_select_urban$taxa, summary_ss_select_rural$taxa))
+union_siggenes <- unique(c(ss_select_urban$gene, ss_select_rural$gene))
+
+union_sigtaxa <- unique(c(summary_ss_select_urban$taxa, summary_ss_select_rural$taxa))
+
+# narrow down to most abundant pathways
+pathways01 <- read.csv("results/docs/pathways01.csv")
+union_sigtaxa_s <- union_sigtaxa[union_sigtaxa %in% as.list(pathways01$taxa)]
+
+ss_select_urban_s <- ss_select_urban %>%
+  dplyr::filter(taxa %in% union_sigtaxa_s) %>%
+  dplyr::filter(abs(beta_est) > 0.02)
+ss_select_rural_s <- ss_select_rural %>%
+  dplyr::filter(taxa %in% union_sigtaxa_s) %>%
+  dplyr::filter(abs(beta_est) > 0.02)
+
+union_sigtaxa_s <- unique(c(ss_select_urban_s$taxa, ss_select_urban_s$taxa))
+union_siggenes_s <- unique(c(ss_select_urban_s$gene, ss_select_rural_s$gene))
+
+```
+For supplementary table, join urban/rural/all based on pathway names
+```{r}
+library(purrr)
+
+summary_ss_select_list <- list(summary_ss_select_urban = summary_ss_select_urban, summary_ss_select_rural = summary_ss_select_rural, summary_ss_select_all = summary_ss_select_all)
+
+summary_ss_select_list_renamed <- imap(summary_ss_select_list, ~ rename(.x, !!paste0("num_genes_", .y) := num_genes))
+
+summary_ss_select_list_joined <- purrr::reduce(summary_ss_select_list_renamed, full_join, by = "taxa")
+write_clip(summary_ss_select_list_joined)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+aldex2_clr_all_sig <- read.csv("results/docs/DA_microbe_aldex2.csv", row.names=1) %>%
+  rownames_to_column("taxa")
+
+
+summary_ss_select_urban_plot <- summary_ss_select_urban %>%
+  dplyr::slice(1:15) %>%
+  arrange(num_genes) %>%
+  mutate(taxa = factor(taxa, levels=taxa))
+summary_ss_select_rural_plot <- summary_ss_select_rural %>%
+  dplyr::slice(1:15) %>%
+  arrange(num_genes) %>%
+  mutate(taxa = factor(taxa, levels=taxa))
+
+ggplot(summary_ss_select_urban_plot, aes(x = num_genes, y = taxa)) +
+  geom_bar(stat = "identity", alpha=0.8) +
+  theme_linedraw() 
+#ggsave("results/figs/RNAseq-metaG-microbe-Lasso/urban_bar.png", width=5, height=4)
+ggplot(summary_ss_select_rural_plot, aes(x = num_genes, y = taxa)) +
+  geom_bar(stat = "identity", alpha=0.8) +
+  theme_linedraw()
+#ggsave("results/figs/RNAseq-metaG-microbe-Lasso/rural_bar.png", width=5, height=4)
+```
+
+Check for overlap between lasso models
+```{r}
+common_values <- Reduce(intersect, list(ss_select_rural$gene_taxa, ss_select_urban$gene_taxa))
+common_values
+
+gene_counts_rural <- ss_select_rural %>%
+  group_by(gene) %>%
+  summarise(count = n()) #%>%
+  #filter(count >= 2)
+
+gene_counts_rural <- ss_select_rural %>%
+  inner_join(gene_counts_rural, by = "gene")
+
+taxa_counts_rural <- gene_counts_rural %>%
+  group_by(taxa) %>%
+  summarise(count = n()) %>%
+  dplyr::filter(count >= 2)
+
+gene_counts_rural2 <- gene_counts_rural %>%
+  dplyr::filter(taxa %in% taxa_counts_rural$taxa)
+
+taxa_counts_rural2 <- gene_counts_rural2 %>%
+  group_by(taxa) %>%
+  summarise(count = n()) %>%
+  dplyr::filter(count >= 2)
+
+gene_counts_urban <- ss_select_urban %>%
+  group_by(gene) %>%
+  summarise(count = n()) #%>%
+  #filter(count >= 2)
+
+gene_counts_urban <- ss_select_urban %>%
+  inner_join(gene_counts_urban, by = "gene")
+
+taxa_counts_urban <- gene_counts_urban %>%
+  group_by(taxa) %>%
+  summarise(count = n()) %>%
+  dplyr::filter(count >= 2)
+
+gene_counts_urban2 <- gene_counts_urban %>%
+  dplyr::filter(taxa %in% taxa_counts_urban$taxa)
+
+# Display the result
+print(gene_counts_rural)
+print(gene_counts_urban)
+
+print(taxa_counts_rural)
+print(taxa_counts_urban)
+
+print(taxa_counts_rural2)
+```
+
+```{r}
+lasso_urban_select <- lasso_urban %>%
+  dplyr::filter(gene %in% c(gene_counts_rural$gene, gene_counts_urban$gene)) %>%
+  dplyr::filter(taxa %in% c(ss_select_rural$taxa, ss_select_urban$taxa))
+
+lasso_rural_select <- lasso_rural %>%
+  dplyr::filter(gene %in% c(gene_counts_rural$gene, gene_counts_urban$gene)) %>%
+  dplyr::filter(taxa %in% c(ss_select_rural$taxa, ss_select_urban$taxa))
+```
+```{r}
+# THIS IS A SHORTCUT BUT BRING DOWN UNION TO SPECIES ONLY BY SELECTING TAXA WITH UNDERSCORE
+# NOT SUPER CORRECT NEED TO FIX LATER
+#union_sigtaxa_s <- grep("_", union_sigtaxa, value = TRUE)
+
+lasso_urban_select2 <- lasso_urban %>%
+  dplyr::filter(gene %in% union_siggenes_s) %>%
+  dplyr::filter(taxa %in% union_sigtaxa_s)
+
+lasso_rural_select2 <- lasso_rural %>%
+  dplyr::filter(gene %in% union_siggenes_s) %>%
+  dplyr::filter(taxa %in% union_sigtaxa_s)
+```
+
+
+```{r}
+sorted_microbes_df <- summary_ss_select_urban %>%
+  dplyr::rename(num_genes_urban = num_genes) %>%
+  left_join(summary_ss_select_rural, by="taxa") %>%
+  dplyr::rename(num_genes_rural = num_genes) %>%
+  #dplyr::filter(taxa %in% as.list(pathways01$taxa)) %>%
+  mutate(sig_in = case_when(num_genes_urban > 0 & is.na(num_genes_rural) ~ "urban",
+                            num_genes_rural > 0 & is.na(num_genes_urban) ~ "rural",
+                            num_genes_urban > 0 & num_genes_rural > 0 ~ "both",
+                            T ~ "neither"))
+
+sorted_microbes_df_filt <- sorted_microbes_df %>%
+  dplyr::filter(!sig_in == "neither") %>%
+  dplyr::filter(num_genes_urban > 11 | num_genes_rural > 11)
+
+sorted_microbes_long <- sorted_microbes_df_filt %>%
+  pivot_longer(
+    cols = c(num_genes_urban, num_genes_rural),
+    names_to = "urbanism",
+    names_prefix = "num_genes_",
+    values_to = "num_genes"
+  ) %>%
+  mutate(num_genes = case_when(is.na(num_genes) ~ 0,
+                               T ~ num_genes)) %>%
+  # clean up pathway name
+  mutate(taxa = str_remove_all(taxa, "mc_PWY_\\d{4}__|mc_PWY__|mc_.*?_PWY__")) %>%
+  mutate(taxa = str_replace_all(taxa, "_", " "))
+
+sorted_microbes_order <- sorted_microbes_long %>%
+  dplyr::filter(urbanism =="rural") %>%
+  arrange(num_genes) 
+
+sorted_microbes_long$taxa <- factor(sorted_microbes_long$taxa, levels = unique(sorted_microbes_order$taxa))
+```
+```{r}
+ggplot(sorted_microbes_long, aes(x=urbanism, y=taxa, fill=urbanism, alpha=num_genes)) +
+  geom_tile() +
+  scale_fill_manual(values=c("#6FBD8B", "#7B2BC1")) +
+  theme_linedraw() +
+  theme(panel.grid.major = element_blank(),  # Remove major gridlines
+        panel.grid.minor = element_blank())  # Remove minor gridlines
+ggsave("results/figs/RNAseq-metaG-microbe-Lasso/top_pathways.png", width = 5.3, height=2.5)
+```
+
+
+
+
+
+
+
+
+```{r}
+heatamp_aldex2_clr_all_sig <- aldex2_clr_all_sig %>%
+  dplyr::filter(taxa %in% union_sigtaxa_s)
+
+# Create annotation data frame for rows (taxa)
+annotation_df <- data.frame(DA_urbanism = heatamp_aldex2_clr_all_sig$DA_urbanism,
+                            taxa = heatamp_aldex2_clr_all_sig$taxa)
+
+annotation_df_rural <- annotation_df %>%
+  #left_join(summary_ss_select_rural, by ="taxa") %>%
+  #mutate(gr10 = case_when(num_genes > 9 ~ "gr10",
+  #                        T ~ "les10")) %>%
+  #dplyr::select(-num_genes) %>%
+  column_to_rownames("taxa")
+
+annotation_df_urban <- annotation_df %>%
+  #left_join(summary_ss_select_urban, by ="taxa") %>%
+  #mutate(gr10 = case_when(num_genes > 9 ~ "gr10",
+  #                        T ~ "les10")) %>%
+  #dplyr::select(-num_genes) %>%
+  column_to_rownames("taxa")
+
+# Define colors for annotations
+annotation_colors <- list(
+  DA_urbanism = c(rural = "#6FBD8B", urban = "#7B2BC1")#,
+  #gr10 = c(gr10 = "black", les10 = "white")
+)
+
+```
+
+
+
+```{r}
+generate_heatmap <- function(df, annotation_row_df) {
+
+  library(RColorBrewer)
+  
+  breaksList = seq(-0.1, 0.1, by = 0.01)
+  
+
+  # Create a matrix with taxa as rows and genes as columns
+  heatmap_matrix <- df %>%
+    select(gene, taxa, beta_est) %>%
+    dplyr::filter(!gene=="ENSG00000167995") %>%
+    spread(key = gene, value = beta_est) %>%
+    as.data.frame()
+
+  # Convert to matrix
+  rownames(heatmap_matrix) <- heatmap_matrix$taxa
+  heatmap_matrix <- as.matrix(heatmap_matrix[,-1])
+
+  # pheatmap
+  heatmap <- pheatmap(heatmap_matrix,
+                            cluster_rows = T,           # Hierarchical clustering for rows
+                            cluster_cols = T, 
+                      #clustering_distance_rows = "correlation",
+                      # Hierarchical clustering for columns
+                      #cutree_cols=5, 
+                      #cutree_rows = 3,
+                      color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(length(breaksList)),
+                            breaks = breaksList,
+                      #annotation_row = annotation_row_df, annotation_colors = annotation_colors,
+                            fontsize_number = 0,           # Font size for numbers (annotations)
+                            main = "Heatmap of betas")
+
+}
+
+# Example usage
+# result <- generate_heatmap(lasso_all_select)
+# result$ggplot_heatmap
+# result$pheatmap_heatmap
+
+```
+```{r}
+save_pheatmap_png <- function(x, filename, width=1500, height=1200, res = 150) {
+  png(filename, width = width, height = height, res = res)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+```
+```{r}
+length(unique(lasso_urban_select2$gene))
+```
+
+```{r}
+library(pheatmap)
+#generate_heatmap(lasso_all_select2)
+urban_gene_heatmap <- generate_heatmap(lasso_urban_select2, annotation_df_urban)
+rural_gene_heatmap <- generate_heatmap(lasso_rural_select2, annotation_df_rural)
+```
+```{r}
+save_pheatmap_png(urban_gene_heatmap, "results/figs/RNAseq-metaG-function-Lasso/urban_gene_heatmap.png")
+save_pheatmap_png(rural_gene_heatmap, "results/figs/RNAseq-metaG-function-Lasso/rural_gene_heatmap.png")
+```
+```{r}
+library(pheatmap)
+library(RColorBrewer)
+
+generate_heatmap <- function(df) {
+  
+  # Create a matrix with taxa as rows and genes as columns
+  heatmap_matrix <- df %>%
+    select(gene, taxa, beta_est) %>%
+    filter(!gene == "ENSG00000167995") %>%
+    spread(key = gene, value = beta_est) %>%
+    as.data.frame()
+  
+  # Convert to matrix
+  rownames(heatmap_matrix) <- heatmap_matrix$taxa
+  heatmap_matrix <- as.matrix(heatmap_matrix[,-1])
+  
+}
+
+  breaksList = seq(-0.16, 0.16, by = 0.01)
+
+heatmap_matrix_urban <- generate_heatmap(lasso_urban_select2)
+heatmap_urban <- pheatmap(heatmap_matrix_urban,
+                      cluster_rows = T,  
+                      cluster_cols = T, 
+                      color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(length(breaksList)),
+                      breaks = breaksList,
+                      fontsize_number = 0,           # Font size for numbers (annotations)
+                      main = "Heatmap of betas")
+  
+# Extract row and column order from urban_gene_heatmap
+urban_row_order <- heatmap_urban$tree_row$order
+urban_col_order <- heatmap_urban$tree_col$order
+
+# Generate the rural heatmap with the same order as urban_gene_heatmap
+heatmap_matrix_rural <- generate_heatmap(lasso_rural_select2)
+heatmap_rural <- pheatmap(heatmap_matrix_rural[urban_row_order, urban_col_order, drop = FALSE],
+                      cluster_rows = FALSE,  # Use the same order as urban
+                      cluster_cols = FALSE,  # Use the same order as urban
+                      color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(length(breaksList)),
+                      breaks = breaksList,
+                      fontsize_number = 0,           # Font size for numbers (annotations)
+                      main = "Heatmap of betas")
+
+save_pheatmap_png(heatmap_urban, "results/figs/RNAseq-metaG-function-Lasso/urban_gene_heatmap.png")
+save_pheatmap_png(heatmap_rural, "results/figs/RNAseq-metaG-function-Lasso/rural_gene_heatmap.png")
+
+```
+```{r}
+# Define genes and microbes of interest
+ss_gene_union <- unique(union(ss_select_urban$gene, ss_select_rural$gene))
+ss_gene_union <- setdiff(ss_gene_union, "ENSG00000165879")
+ss_taxa_union <- unique(union(ss_select_urban$taxa, ss_select_rural$taxa)) 
+#ss_taxa_union <- setdiff(ss_taxa_union, "mc_PWY_5850__superpathway_of_menaquinol_6_biosynthesis")
+length(ss_gene_union)
+length(ss_taxa_union)
+
+# Extract gene counts and microbe counts in each treatment
+#ss_taxa_abundance_urban <- dplyr::select(as.data.frame(pathways_urban), ss_taxa_union)
+#ss_taxa_abundance_rural <- dplyr::select(as.data.frame(pathways_rural), ss_taxa_union)
+
+#ss_gene_abundance_urban <- dplyr::select(as.data.frame(genes_urban), ss_gene_union)
+#ss_gene_abundance_rural <- dplyr::select(as.data.frame(genes_rural), ss_gene_union)
+
+ss_taxa_abundance_urban <- dplyr::select(as.data.frame(pathways_urban), unique(ss_select_urban$taxa))
+ss_taxa_abundance_rural <- as.data.frame(pathways_rural) %>%
+  dplyr::select(all_of(intersect(unique(ss_select_rural$taxa), colnames(pathways_rural))))
+
+
+
+ss_gene_abundance_urban <- dplyr::select(as.data.frame(genes_urban), unique(ss_select_urban$gene))
+ss_gene_abundance_rural <- dplyr::select(as.data.frame(genes_rural), unique(ss_select_rural$gene))
+
+# Correlation of gene matrix and microbe matrix
+correlate_matrices_with_pvalues <- function(A, B, method = "spearman", n_perm = 1000, adjust_method = "BH") {
+  if (nrow(A) != nrow(B)) {
+    stop("Matrices A and B must have the same number of rows")
+  }
+  
+  # Initialize matrices
+  cor_matrix <- matrix(NA, ncol = ncol(A), nrow = ncol(B))
+  pval_matrix <- matrix(NA, ncol = ncol(A), nrow = ncol(B))
+  rownames(cor_matrix) <- colnames(B)
+  colnames(cor_matrix) <- colnames(A)
+  rownames(pval_matrix) <- colnames(B)
+  colnames(pval_matrix) <- colnames(A)
+  
+  raw_pvalues <- c()  # Store all raw p-values for adjustment
+  
+  # Correlation and p-value computation
+  for (i in seq_len(ncol(A))) {
+    for (j in seq_len(ncol(B))) {
+      # Compute correlation
+      cor_obs <- cor(A[, i], B[, j], method = method)
+      cor_matrix[j, i] <- cor_obs
+      
+      # Permutation testing for p-values
+      perm_cor <- replicate(n_perm, cor(sample(A[, i]), B[, j], method = method))
+      pval <- mean(abs(perm_cor) >= abs(cor_obs))  # Two-tailed p-value
+      pval_matrix[j, i] <- pval
+      
+      # Store raw p-value
+      raw_pvalues <- c(raw_pvalues, pval)
+    }
+  }
+  
+  # Adjust p-values for multiple testing
+  adjusted_pvalues <- p.adjust(raw_pvalues, method = adjust_method)
+  adjusted_pval_matrix <- matrix(adjusted_pvalues, ncol = ncol(A), nrow = ncol(B))
+  rownames(adjusted_pval_matrix) <- colnames(B)
+  colnames(adjusted_pval_matrix) <- colnames(A)
+  
+  return(list(correlations = cor_matrix, raw_pvalues = pval_matrix, adjusted_pvalues = adjusted_pval_matrix))
+}
+
+
+
+```
+
+```{r}
+ss_urban_genetaxa_cor_pval <- correlate_matrices_with_pvalues(ss_taxa_abundance_urban, ss_gene_abundance_urban)
+ss_rural_genetaxa_cor_pval <- correlate_matrices_with_pvalues(ss_taxa_abundance_rural, ss_gene_abundance_rural)
+```
+```{r}
+ss_urban_genetaxa_cor <- ss_urban_genetaxa_cor_pval[[1]]
+ss_rural_genetaxa_cor <- ss_rural_genetaxa_cor_pval[[1]]
+
+ss_urban_genetaxa_pval <- ss_urban_genetaxa_cor_pval[[2]]
+ss_rural_genetaxa_pval <- ss_rural_genetaxa_cor_pval[[2]]
+
+ss_urban_genetaxa_padj <- ss_urban_genetaxa_cor_pval[[3]]
+ss_rural_genetaxa_padj <- ss_rural_genetaxa_cor_pval[[3]]
+```
+```{r}
+sig_threshold <- 0.1
+significant_pairs <- which(pval_matrix < sig_threshold, arr.ind = TRUE)
+
+# Display significant correlations
+data.frame(
+  Taxa = rownames(pval_matrix)[significant_pairs[, 1]],
+  Gene = colnames(pval_matrix)[significant_pairs[, 2]],
+  Correlation = cor_matrix[significant_pairs],
+  Pvalue = pval_matrix[significant_pairs]
+)
+```
+
+
+
+```{r}
+library(pheatmap)
+library(RColorBrewer)
+
+
+breaksList = seq(-1, 1, by = 0.1)
+
+heatmap_urban <- pheatmap(ss_urban_genetaxa_cor,
+                          show_colnames = FALSE,
+                      cluster_rows = T,  
+                      cluster_cols = T, 
+                      color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(length(breaksList)),
+                      breaks = breaksList,
+                      fontsize_number = 0,           # Font size for numbers (annotations)
+                      main = "Heatmap of spearman")
+  
+# Extract row and column order from urban_gene_heatmap
+urban_row_order <- heatmap_urban$tree_row$order
+urban_col_order <- heatmap_urban$tree_col$order
+
+heatmap_rural <- pheatmap(ss_rural_genetaxa_cor,
+                          show_colnames = FALSE,
+                      cluster_rows = T,  # Use the same order as urban
+                      cluster_cols = T,  # Use the same order as urban
+                      color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(length(breaksList)),
+                      breaks = breaksList,
+                      fontsize_number = 0,           # Font size for numbers (annotations)
+                      main = "Heatmap of spearman")
+
+# Generate the rural heatmap with the same order as urban_gene_heatmap
+#heatmap_rural <- pheatmap(ss_rural_genetaxa_cor[urban_row_order, urban_col_order, drop = FALSE],
+#                          show_colnames = FALSE,
+#                      cluster_rows = FALSE,  # Use the same order as urban
+#                      cluster_cols = FALSE,  # Use the same order as urban
+#                      color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(length(breaksList)),
+#                      breaks = breaksList,
+#                      fontsize_number = 0,           # Font size for numbers (annotations)
+#                      main = "Heatmap of spearman")
+
+
+
+#save_pheatmap_png(heatmap_urban, "results/figs/RNAseq-metaG-microbe-Lasso/urban_gene_heatmap.png")
+#save_pheatmap_png(heatmap_rural, "results/figs/RNAseq-metaG-microbe-Lasso/rural_gene_heatmap.png")
+```
+Check if theres a significant difference in the effect sizes and pvalues of urban and rural
+```{r}
+# Count positive log2foldchange for significant results
+pos_uc <- sum(res_uc$log2FoldChange > 0)
+pos_rc <- sum(res_rc$log2FoldChange > 0)
+
+# Total significant results in each model
+total_uc <- nrow(res_uc)
+total_rc <- nrow(res_rc)
+
+# Proportion of positives in rural model
+expected_p <- pos_rc / total_rc
+
+# Binomial test for the urban model
+binom_test_uc <- binom.test(x = pos_uc, n = total_uc, p = expected_p, alternative = "greater")
+binom_test_uc
+
+```
+
+
+
+
+
+```{r}
+lasso_urban_dotplot <- lasso_urban %>%
+  mutate(gene_taxa = paste0(gene, ":", taxa)) %>%
+  dplyr::select(gene_taxa, beta_est) %>%
+  dplyr::rename(beta_urban = beta_est)
+
+lasso_rural_dotplot <- lasso_rural %>%
+  mutate(gene_taxa = paste0(gene, ":", taxa)) %>%
+  dplyr::select(gene_taxa, beta_est) %>%
+  dplyr::rename(beta_rural = beta_est)
+
+lasso_dotplot <- merge(lasso_urban_dotplot, lasso_rural_dotplot, by="gene_taxa") %>%
+  mutate(color_group = case_when(
+    gene_taxa %in% ss_select_rural & gene_taxa %in% ss_select_urban ~ "both",
+    gene_taxa %in% ss_select_rural ~ "rural",
+    gene_taxa %in% ss_select_urban ~ "urban",
+    TRUE ~ "NS"
+  )) %>%
+  mutate(sig = case_when(
+    color_group == "NS" ~ "NS",
+    TRUE ~ "sig"
+  ))
+```
+
+```{r}
+ggplot(lasso_dotplot, aes(x=abs(beta_urban), y=abs(beta_rural), fill=sig, shape=sig, size=sig, color=color_group)) + 
+  geom_point(alpha=0.5) +
+  scale_shape_manual(values=c(19,3)) +
+  scale_color_manual(values=c("#6FBD8B", "grey20", "#7B2BC1", "grey80")) + 
+  scale_size_manual(values=c(1,1)) +
+  geom_abline(linetype="dashed")+
+  #geom_smooth(data = subset(lasso_dotplot, sig == "Sig"), method = "lm", se = FALSE, size=0.5, color="indianred3") +
+  geom_smooth(method = "lm", se = FALSE, size=0.5, color="indianred3") +
+  xlab("abs(beta): Industrialized") +
+  ylab("abs(beta): Non-industrialized") +
+  #xlim(values=c(0, 12.5)) +
+  #ylim(values=c(0, 12.5)) +
+  theme_linedraw() + 
+  coord_fixed() +
+  theme(legend.position="none")
+```
+
+
+
+
+https://tavareshugo.github.io/data-carpentry-rnaseq/03_rnaseq_pca.html
+```{r}
+# Example function to generate PCA plot
+generate_pca_plot <- function(df) {
+  # Assuming df contains relevant numeric data for PCA
+  
+pca_matrix <- df %>% 
+  dplyr::select(gene, taxa, beta_est) %>%
+  pivot_wider(names_from = taxa, values_from = beta_est)
+  # make the "gene" column become the rownames of the table
+  column_to_rownames("gene") %>% 
+  # coerce to a matrix
+  as.matrix() %>% 
+  # transpose the matrix so that rows = samples and columns = variables
+  t()
+
+# Plotting using ggplot2
+#sample_pca <- prcomp(pca_matrix)
+
+
+}
+
+generate_pca_plot(lasso_rural_select2)
+```
+```{r}
+generate_pca_plot(lasso_all_select2)
+generate_pca_plot(lasso_rural_select2)
+generate_pca_plot(lasso_urban_select2)
+```
+
+
+
+
+Print the genes that match to interesting microbes
+```{r}
+test <- ss_select_rural %>%
+  dplyr::filter(taxa == "Unknown_genus_15") %>%
+  pull(gene)
+library(clipr)
+write_clip(test)
+```
+
+
+
+
+```{r}
+# Create a nested list of data frames by unique values in the 'taxa' column
+ss_select_all_nested <- split(ss_select_all, ss_select_all$taxa)
+ss_select_urban_nested <- split(ss_select_urban, ss_select_urban$taxa)
+ss_select_rural_nested <- split(ss_select_rural, ss_select_rural$taxa)
+
+# Pare down to microbes with >10 genes
+ss_select_all_nested5 <- Filter(function(df) nrow(df) >= 5, ss_select_all_nested)
+ss_select_all_nested10 <- Filter(function(df) nrow(df) >= 10, ss_select_all_nested)
+ss_select_urban_nested10 <- Filter(function(df) nrow(df) >= 10, ss_select_urban_nested)
+ss_select_rural_nested10 <- Filter(function(df) nrow(df) >= 10, ss_select_rural_nested)
+```
+
+Functional analysis
+```{r}
+annotate_ensembl <- function(ensembl_ids) {
+  ensembl = useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl", host = "jul2023.archive.ensembl.org") #, host = "jul2023.archive.ensembl.org"
+
+  # Define annotations
+  att_interest <- c("ensembl_gene_id", "uniprot_gn_symbol") #, "uniprot_gn_id", "entrezgene_id"
+
+  # Annotate
+  annotated_data <- biomaRt::getBM(
+    attributes = att_interest,
+    filters = "ensembl_gene_id",
+    values = ensembl_ids,
+    mart = ensembl
+  )
+
+  return(annotated_data)
+}
+```
+```{r}
+ss_select_all_nested5_anno <- lapply(ss_select_all_nested5, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+```
+```{r}
+ss_select_all_nested10_anno <- lapply(ss_select_all_nested10, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+```
+```{r}
+ss_select_urban_nested10_anno <- lapply(ss_select_urban_nested10, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+```
+```{r}
+ss_select_rural_nested10_anno <- lapply(ss_select_rural_nested10, function(ensembl_ids) {
+  if (length(ensembl_ids) > 0) {
+    return(annotate_ensembl(ensembl_ids))
+  } else {
+    return(data.frame(ensembl_gene_id = character(), uniprot_gn_symbol = character(), uniprot_gn_id = character(), entrezgene_id = character()))
+  }
+})
+```
+
+Define universe
+```{r}
+uni <- rownames(genes_bc)
+uni <- annotate_ensembl(uni)
+uni_uniprot <- unlist(list(uni$uniprot_gn_id))
+uni_entrez <- unlist(list(uni$entrez_gene_id))
+
+uni_urban <- rownames(genes_urban)
+uni_urban <- annotate_ensembl(uni_urban)
+uni_urban_uniprot <- unlist(list(uni_urban$uniprot_gn_id))
+uni_urban_entrez <- unlist(list(uni_urban$entrez_gene_id))
+
+uni_rural <- rownames(genes_rural)
+uni_rural <- annotate_ensembl(uni_rural)
+uni_rual_uniprot <- unlist(list(uni_rural$uniprot_gn_id))
+uni_rural_entrez <- unlist(list(uni_rural$entrez_gene_id))
+```
+
+
+```{r}
+library(msigdbr)
+
+#msigdbr_collections()
+
+# download databases of interest
+msigdb_h = msigdbr(species = "human", category = "H")
+msigdb_cpPID = msigdbr(species = "human", category = "C2", subcategory = "CP:PID")
+msigdb_cpKEGG = msigdbr(species = "human", category = "C2", subcategory = "CP:KEGG")
+msigdb_cpREACTOME = msigdbr(species = "human", category = "C2", subcategory = "CP:REACTOME")
+msigdb_cpBIOCARTA = msigdbr(species = "human", category = "C2", subcategory = "CP:BIOCARTA")
+msigdb_cgp = msigdbr(species = "human", category = "C2", subcategory = "CGP") %>%
+  mutate(gs_name = paste("CGP", gs_name, sep = "_"))
+msigdb_cgn = msigdbr(species = "human", category = "C4", subcategory = "CGN") %>%
+  mutate(gs_name = paste("CGN", gs_name, sep = "_"))
+msigdb_cm = msigdbr(species = "human", category = "C4", subcategory = "CM") %>%
+  mutate(gs_name = paste("CM", gs_name, sep = "_"))
+msigdb_IMMUNESIGDB = msigdbr(species = "human", category = "C7", subcategory = "IMMUNESIGDB") %>%
+  mutate(gs_name = paste("IMMUNESIGDB", gs_name, sep = "_"))
+
+# Experimenting with pasting these all together to reduce code burden
+msigdb_cp <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>%
+  rbind(msigdb_cpPID)
+
+msigdb_all <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>% #, msigdb_cpREACTOME
+  rbind(msigdb_cpPID) %>%
+  rbind(msigdb_cpBIOCARTA) %>%
+  rbind(msigdb_h) #%>%
+  #rbind(msigdb_cgp) %>%
+  #rbind(msigdb_cgn) %>%
+  #rbind(msigdb_cm)  %>%
+  #rbind(msigdb_IMMUNESIGDB)
+  
+# Summarize metrics from all pathways from all databases
+msigdb_cp_summary <- msigdb_cp %>%
+  group_by(gs_name) %>%
+  summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  # sambhawas filtering cutoffs
+  dplyr::filter(GeneCount > 25, GeneCount < 300)
+
+msigdb_all_summary <- msigdb_all %>%
+  group_by(gs_name) %>%
+  summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  # sambhawas filtering cutoffs
+  dplyr::filter(GeneCount > 25, GeneCount < 300)
+
+# Narrow down pathways that meet our thresholds  
+msigdb_cp_filt <- msigdb_cp %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpPID_filt <- msigdb_cpPID %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpKEGG_filt <- msigdb_cpKEGG %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpREACTOME_filt <- msigdb_cpREACTOME %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpBIOCARTA_filt <- msigdb_cpBIOCARTA %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+
+msigdb_all_filt <- msigdb_all %>%
+  dplyr::filter(gs_name %in% msigdb_all_summary$gs_name)
+```
+
+clusterProfiler for enrichment analysis.
+```{r}
+library(clusterProfiler)
+
+# df of distinct gene symbols
+# TERM2GENE is a data frame with first column of term ID and second column of corresponding mapped gene
+msigdb_cp_t2g = msigdb_all_filt %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+```
+
+```{r}
+perform_enrichment <- function(input, msigdb_cp_t2g, uni, model, dir) {
+  enrich_res_list <- list()  # List to store all enrichment results
+  enrich_sig_list <- list()  # List to store significant enrichments
+  
+  for (i in seq_along(input)) {
+    df <- input[[i]]  # Extract the dataframe
+    # Extract symbols from the current dataframe
+    symbols <- df$uniprot_gn_symbol
+    
+    # Perform enrichment analysis for the current list of symbols
+    enrich <- enricher(gene = unique(symbols),
+                       TERM2GENE = msigdb_cp_t2g,
+                       universe = uni$hgnc_symbol)
+    
+    # Extract results
+    enrich_res <- enrich@result %>% mutate(model = model, dir = dir, component = names(input)[i])
+    enrich_res <- enrich_res %>% mutate(model_dir_component = paste(model, dir, component, sep="."))
+    
+    # Filter significant enrichments
+    enrich_sig <- enrich_res %>% dplyr::filter(Count > 2, p.adjust < 0.1)
+    
+    # Store results for the current dataframe
+    enrich_res_list[[i]] <- enrich_res
+    enrich_sig_list[[i]] <- enrich_sig
+  }
+  
+  return(list(enrich_res_list = enrich_res_list, enrich_sig_list = enrich_sig_list))
+}
+
+```
+
+```{r}
+sig_genes_anno_enrich5 <- perform_enrichment(ss_select_all_nested5_anno, msigdb_cp_t2g, uni, "all", "NA")
+
+sig_genes_anno_enrich <- perform_enrichment(ss_select_all_nested10_anno, msigdb_cp_t2g, uni, "all", "NA")
+
+sig_urban_genes_anno_enrich <- perform_enrichment(ss_select_urban_nested10_anno, msigdb_cp_t2g, uni_urban, "urban", "NA")
+
+sig_rural_genes_anno_enrich <- perform_enrichment(ss_select_rural_nested10_anno, msigdb_cp_t2g, uni_rural, "rural", "NA")
+
+```
+Flatten
+```{r}
+all_enrich_res5 <- do.call(rbind, sig_genes_anno_enrich5$enrich_res_list)
+all_enrich_res <- do.call(rbind, sig_genes_anno_enrich$enrich_res_list)
+u_enrich_res <- do.call(rbind, sig_urban_genes_anno_enrich$enrich_res_list)
+
+r_enrich_res <- do.call(rbind, sig_rural_genes_anno_enrich$enrich_res_list)
+
+all_enrich_sig5 <- do.call(rbind, sig_genes_anno_enrich5$enrich_sig_list)
+all_enrich_sig <- do.call(rbind, sig_genes_anno_enrich$enrich_sig_list)
+u_enrich_sig <- do.call(rbind, sig_urban_genes_anno_enrich$enrich_sig_list)
+
+r_enrich_sig <- do.call(rbind, sig_rural_genes_anno_enrich$enrich_sig_list)
+```
+
+Overrep of all genes that are diff abun in diet or blood
+```{r}
+lifestyle_enrich <- function(feature_list) {
+  # Filter ss_select_all based on feature list
+  ss_select_all_feature <- ss_select_all %>%
+    dplyr::filter(taxa %in% feature_list)
+  
+  # Annotate ensembl genes in the filtered feature list
+  symbols <- annotate_ensembl(unique(ss_select_all_feature$gene))
+  
+  # Extract unique symbols
+  unique_symbols <- unique(symbols$uniprot_gn_symbol)
+
+  # Perform enrichment analysis using the unique symbols
+  enrich <- enricher(
+    gene = unique_symbols,
+    TERM2GENE = msigdb_cp_t2g,
+    universe = uni$uniprot_gn_symbol
+  )
+  
+  # Extract results
+  enrich_res <- enrich@result
+  
+  # Filter significant enrichments
+  enrich_sig <- enrich_res %>% dplyr::filter(Count > 1, p.adjust < 0.1)
+  
+  return(enrich_sig)
+}
+
+shared_genes <- function(feature_list){
+  # Filter ss_select_all based on feature list
+  ss_select_all_feature <- ss_select_all %>%
+    dplyr::filter(taxa %in% feature_list)
+  
+  # Annotate ensembl genes in the filtered feature list
+  symbols <- annotate_ensembl(unique(ss_select_all_feature$gene))
+  
+  # Extract unique symbols
+  unique_symbols <- unique(symbols$uniprot_gn_symbol)
+  
+  # Check for shared genes across multiple taxa
+  shared_genes <- ss_select_all_feature %>%
+    dplyr::group_by(gene) %>%
+    dplyr::summarize(taxa_count = n_distinct(taxa)) %>%
+    dplyr::filter(taxa_count > 1)
+  
+  # If there are shared genes, print them as a dataframe
+  if (nrow(shared_genes) > 0) {
+    print("Shared genes across multiple taxa:")
+    print(shared_genes)
+  }
+}
+```
+Diet PC1
+```{r}
+diet_features_neg <- c(
+"mc_PWY_7456___beta___1_4__mannan_degradation",
+"mc_FERMENTATION_PWY__mixed_acid_fermentation",
+"mc_PWY_6527__stachyose_degradation",
+"mc_PWY_6151__S_adenosyl_L_methionine_salvage_I",
+"mc_PWY_6122__5_aminoimidazole_ribonucleotide_biosynthesis_II",
+"mc_PWY_6277__superpathway_of_5_aminoimidazole_ribonucleotide_biosynthesis",
+"mc_PWY_6936__seleno_amino_acid_biosynthesis__plants_",
+"mc_HSERMETANA_PWY__L_methionine_biosynthesis_III",
+"mc_P41_PWY__pyruvate_fermentation_to_acetate_and__S__lactate_I",
+"mc_PWY_5103__L_isoleucine_biosynthesis_III",
+"mc_ARGSYN_PWY__L_arginine_biosynthesis_I__via_L_ornithine_",
+"mc_ARGSYNBSUB_PWY__L_arginine_biosynthesis_II__acetyl_cycle_",
+"mc_GLUTORN_PWY__L_ornithine_biosynthesis_I",
+"mc_PWY_7208__superpathway_of_pyrimidine_nucleobases_salvage",
+"mc_ILEUSYN_PWY__L_isoleucine_biosynthesis_I__from_threonine_",
+"mc_BRANCHED_CHAIN_AA_SYN_PWY__superpathway_of_branched_chain_amino_acid_biosynthesis",
+"mc_PWY_6121__5_aminoimidazole_ribonucleotide_biosynthesis_I",
+"mc_TRNA_CHARGING_PWY__tRNA_charging",
+"mc_PWY_5100__pyruvate_fermentation_to_acetate_and_lactate_II",
+"mc_PWY_7761__NAD_salvage_pathway_II__PNC_IV_cycle_",
+"mc_PWY_6700__queuosine_biosynthesis_I__de_novo_",
+"mc_ANAGLYCOLYSIS_PWY__glycolysis_III__from_glucose_",
+"mc_GLYCOGENSYNTH_PWY__glycogen_biosynthesis_I__from_ADP_D_Glucose_",
+"mc_PWY_5097__L_lysine_biosynthesis_VI",
+"mc_VALSYN_PWY__L_valine_biosynthesis",
+"mc_PWY_5686__UMP_biosynthesis_I",
+"mc_PWY_7790__UMP_biosynthesis_II",
+"mc_PWY_7791__UMP_biosynthesis_III",
+"mc_PWY_7953__UDP_N_acetylmuramoyl_pentapeptide_biosynthesis_III__meso_diaminopimelate_containing_",
+"mc_PWY_1042__glycolysis_IV",
+"mc_PWY_7111__pyruvate_fermentation_to_isobutanol__engineered_",
+"mc_DTDPRHAMSYN_PWY__dTDP__beta__L_rhamnose_biosynthesis",
+"mc_PWY_6317__D_galactose_degradation_I__Leloir_pathway_",
+"mc_GLUCONEO_PWY__gluconeogenesis_I",
+"mc_PEPTIDOGLYCANSYN_PWY__peptidoglycan_biosynthesis_I__meso_diaminopimelate_containing_",
+"mc_PWY_6387__UDP_N_acetylmuramoyl_pentapeptide_biosynthesis_I__meso_diaminopimelate_containing_",
+"mc_PWY_2942__L_lysine_biosynthesis_III",
+"mc_1CMET2_PWY__folate_transformations_III__E__coli_",
+"mc_PWY_6385__peptidoglycan_biosynthesis_III__mycobacteria_",
+"mc_COMPLETE_ARO_PWY__superpathway_of_aromatic_amino_acid_biosynthesis",
+"mc_CALVIN_PWY__Calvin_Benson_Bassham_cycle",
+"mc_ARO_PWY__chorismate_biosynthesis_I",
+"mc_PWY_3841__folate_transformations_II__plants_",
+"mc_COA_PWY__coenzyme_A_biosynthesis_I__prokaryotic_",
+"mc_PWY_6386__UDP_N_acetylmuramoyl_pentapeptide_biosynthesis_II__lysine_containing_",
+"mc_PWY_7851__coenzyme_A_biosynthesis_II__eukaryotic_",
+"mc_PWY_8178__pentose_phosphate_pathway__non_oxidative_branch__II",
+"mc_PWY_7977__L_methionine_biosynthesis_IV",
+"mc_NONMEVIPP_PWY__methylerythritol_phosphate_pathway_I",
+"mc_PWY_7221__guanosine_ribonucleotides_de_novo_biosynthesis",
+"mc_PWY_6609__adenine_and_adenosine_salvage_III",
+"mc_PANTOSYN_PWY__superpathway_of_coenzyme_A_biosynthesis_I__bacteria_",
+"mc_PWY_5941__glycogen_degradation_II"
+  )
+
+diet_features_pos <- c(
+"mc_PWY_5121__superpathway_of_geranylgeranyl_diphosphate_biosynthesis_II__via_MEP_",
+"mc_CITRULBIO_PWY__L_citrulline_biosynthesis",
+"mc_ARGININE_SYN4_PWY__L_ornithine_biosynthesis_II",
+"mc_POLYISOPRENSYN_PWY__polyisoprenoid_biosynthesis__E__coli_",
+"mc_PWY_6859__all_trans_farnesol_biosynthesis",
+"mc_PWY_7392__taxadiene_biosynthesis__engineered_"
+)
+
+diet_neg_enrich_sig <- lifestyle_enrich(diet_features_neg)
+diet_pos_enrich_sig <- lifestyle_enrich(diet_features_pos)
+diet_enrich_sig <- lifestyle_enrich(unlist(c(diet_features_neg,diet_features_pos)))
+diet_shared <- shared_genes(unlist(c(diet_features_neg,diet_features_pos)))
+```
+IgA
+```{r}
+iga_features_neg <- c(
+  "mc_GLUCONEO_PWY__gluconeogenesis_I",
+"mc_PWY_6700__queuosine_biosynthesis_I__de_novo_",
+"mc_PWY_7328__superpathway_of_UDP_glucose_derived_O_antigen_building_blocks_biosynthesis",
+"mc_PWY_7953__UDP_N_acetylmuramoyl_pentapeptide_biosynthesis_III__meso_diaminopimelate_containing_"
+  )
+
+iga_features_pos <- c(
+"mc_POLYISOPRENSYN_PWY__polyisoprenoid_biosynthesis__E__coli_",
+"mc_PWY_6859__all_trans_farnesol_biosynthesis"
+)
+
+iga_neg_enrich_sig <- lifestyle_enrich(iga_features_neg)
+iga_pos_enrich_sig <- lifestyle_enrich(iga_features_pos)
+iga_enrich_sig <- lifestyle_enrich(unlist(c(iga_features_neg,iga_features_pos)))
+iga_shared <- shared_genes(unlist(c(iga_features_neg,iga_features_pos)))
+```
+Antiparasite
+```{r}
+antip_features_neg <- c(
+  "Prevotella",
+"Prevotella_sp_4",
+"Prevotella_sp_1",
+"Prevotella_copri",
+"Eubacterium_rectale",
+"Prevotella_sp_3",
+"Prevotella_sp_5",
+"Roseburia",
+"Eubacterium_sp_4",
+"Prevotella_sp_7",
+"Prevotella_sp_2",
+"Dorea"
+  )
+
+antip_features_pos <- c(
+  "Akkermansia_muciniphila",
+"Ruthenibacterium_lactatiformans",
+"Ruthenibacterium",
+"Odoribacter",
+"Odoribacter_splanchnicus",
+"Alistipes_shahii",
+"Oscillibacter",
+"Oscillibacter_sp_1"
+)
+
+antip_neg_enrich_sig <- lifestyle_enrich(antip_features_neg)
+#antip_pos_enrich_sig <- lifestyle_enrich(antip_features_pos)
+antip_enrich_sig <- lifestyle_enrich(unlist(c(antip_features_neg,antip_features_pos)))
+antip_shared <- shared_genes(unlist(c(antip_features_neg,antip_features_pos)))
+```
+Blood PC1
+```{r}
+#blood_features_neg <- c(
+  #)
+
+blood_features_neg <- c(
+  "mc_GLUCONEO_PWY__gluconeogenesis_I",
+"mc_PWY_3841__folate_transformations_II__plants_"
+)
+
+#blood_neg_enrich_sig <- lifestyle_enrich(blood_features_neg)
+blood_neg_enrich_sig <- lifestyle_enrich(blood_features_neg)
+#blood_enrich_sig <- lifestyle_enrich(unlist(c(blood_features_neg,blood_features_pos)))
+blood_shared <- shared_genes(blood_features_neg)
+```
+Oral topical medication
+```{r}
+otm_features_neg <- c(
+  "Streptomyces",
+"Barnesiella"
+  )
+
+#otm_features_pos <- c(
+#)
+
+otm_neg_enrich_sig <- lifestyle_enrich(otm_features_neg)
+#otm_pos_enrich_sig <- lifestyle_enrich(otm_features_pos)
+#otm_enrich_sig <- lifestyle_enrich(unlist(c(otm_features_neg,otm_features_pos)))
+otm_shared <- shared_genes(otm_features_neg)
+```
+
+
+```{r}
+all_enrich_sig_lifestyle <- all_enrich_sig5 %>%
+  dplyr::filter(ID %in% unlist(c(diet_features_neg, diet_features_pos, iga_features_neg, iga_features_pos, blood_features_neg)))
+```
+

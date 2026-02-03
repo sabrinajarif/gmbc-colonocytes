@@ -25,15 +25,28 @@ control_b5_c5
 control_b5_c4
 control_b5_c3
 
+Read in PC1/PC2 data
+```{#r}
+clr_genus_PC1PC2 <- read.csv("results/docs/clr_genus_PC1PC2.csv") %>%
+  dplyr::rename(Axis1_genus = Axis.1) %>%
+  dplyr::rename(Axis2_genus = Axis.2)
+```
+
 Load metadata
 ```{r}
+richness <- read.csv("data/metadata/richness.csv", row.names = 1)
 meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
+ # merge(clr_genus_PC1PC2[,c("SampleName", "Axis1_genus", "Axis2_genus")], by="SampleName") %>%
+  #dplyr::mutate(Axis1_genus = as.numeric(Axis1_genus)) %>%
+  #mutate(Axis1_genus_scaled = scale(Axis1_genus)[, 1]) %>%
+  #dplyr::mutate(Axis2_genus = as.numeric(Axis2_genus)) %>%
+  #mutate(Axis2_genus_scaled = scale(Axis2_genus)[, 1]) %>%
   # Batch as character
-  mutate(Batch = as.character(Batch)) %>%
+  mutate(Batch = as.factor(Batch)) %>%
   # This sample was bad quality 
   dplyr::filter(!SampleID %in% c("GMCC1S1")) %>%
   # These samples were outliers amongst the RNAseq
-  dplyr::filter(!SampleID %in% c("GMCC4S10", "GMCC3S7", "GMCC4C6", "GMCC5C5", "GMCC5C4", "GMCC5C3")) %>%
+  dplyr::filter(!SampleID %in% c("GMCC4S10", "GMCC3S7", "GMCC4C6", "GMCC5C5", "GMCC5C4", "GMCC5C3", "GMCC4S12")) %>% #NEW ADDITIONS AS OF NOV 2 2024 ARE GMCC4S12 AND GMCC3C1
   # These samples were not used to treat the colonocytes
   dplyr::filter(!SampleName %in% c("1127XT", "1462QI", "3364PX", "3553XK", "3606IJ", "9423WC")) %>%
   # NOT SURE WHY THESE WERE REMOVED
@@ -44,11 +57,19 @@ meta <- read.csv("data/metadata/meta_RNAseq.csv", row.names = 1) %>%
   # Replace 0s in urbanism with control
   mutate(urbanism = replace(urbanism, is.na(urbanism), "control")) %>%
   mutate(country = replace(country, is.na(country), "control")) %>%
+  mutate(age = replace(age, is.na(age), "control")) %>%
+  mutate(sex = replace(sex, is.na(sex), "control")) %>%
+  mutate(coculture_country = paste0(coculture, "_", country)) %>%
   # Add one more column, urbanism2, which separates USA from non-USA urban
   mutate(urbanism2=ifelse(country=="USA", "USA_urban", urbanism)) %>%
   mutate(urbanism2 = replace(urbanism2, is.na(urbanism2), "control")) %>%
   mutate(rnames=SampleID) %>%
-  column_to_rownames("rnames")
+  column_to_rownames("rnames") %>%
+  mutate(Total.Reads_scaled = scale(Total.Reads)[, 1]) #%>%
+ # left_join(richness, by="SampleName") %>%
+  #  dplyr::mutate(Shannon.y = as.numeric(Shannon.y)) %>%
+  #dplyr::mutate(Chao1 = as.numeric(Chao1)) %>%
+ # mutate(Chao1_scaled = scale(Chao1)[, 1]) 
 
 meta <- meta[order(row.names(meta)), ]
 ```
@@ -66,6 +87,8 @@ meta$sex[meta$SampleName %in% imputed_samples$SampleName] <- imputed_samples$sex
 ```
 
 
+
+
 Import raw read counts
 ```{r}
 raw_read_cts_filt <- read.csv("results/docs/raw_read_cts_filt.csv", row.names=1)
@@ -73,24 +96,1205 @@ raw_read_cts_filt <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% meta$S
 raw_read_cts_filt <- raw_read_cts_filt[, order(colnames(raw_read_cts_filt))]
 ```
 
+```{r}
+meta_noctrl <- meta %>% dplyr::filter(!coculture=="control")  
+
+raw_read_cts_filt_noctrl <- raw_read_cts_filt[,meta_noctrl$SampleID]
+```
+
+
+
+
+
+```{#r}
+filtered_counts <- as.matrix(raw_read_cts_filt)
+
+library(limma)
+
+# Log-transform the count data (e.g., log2(counts + 1) to stabilize variance)
+log_counts <- log2(filtered_counts + 1)
+
+# Create the design matrix for country adjustment
+design <- model.matrix(~ country, data = meta)
+
+# Fit the linear model
+fit <- lmFit(log_counts, design)
+
+# Extract residuals (counts with country effect regressed out)
+adjusted_counts <- residuals(fit, log_counts)
+adjusted_counts <- 2^adjusted_counts - 1
+
+```
+```{#r}
+# Perform PCA on gene expression data (transpose for samples as columns)
+pca_result <- prcomp(t(raw_read_cts_filt_noctrl), scale = TRUE)
+
+# Get the principal component scores (PCs for each sample)
+pc_scores <- pca_result$x[,1]  # Rows: samples, Columns: PCs (PC1, PC2, etc.)
+
+
+```
+```{#r}
+# Add the PCA scores (PC1, PC2, ...) to your metadata dataframe
+metadata_with_pcs <- cbind(meta_noctrl, pc_scores)
+
+# Identify numeric columns in the metadata
+numeric_columns <- sapply(metadata_with_pcs, is.numeric)
+
+# Subset the metadata to include only numeric columns
+numeric_metadata_clean <- numeric_metadata[complete.cases(numeric_metadata), ]
+
+# Calculate correlations between metadata columns and PC1
+# Calculate correlations between PCs and numeric metadata columns
+correlations_pcs_numeric <- cor(numeric_metadata_clean[, grep("PC", colnames(numeric_metadata_clean))], 
+                                 numeric_metadata_clean, use = "complete.obs")
+correlations_pcs_numeric <- correlations_pcs_numeric[!rownames(correlations_pcs_numeric) %in% "PCR.Duplicate", ]
+# Remove columns that contain any NA values
+cleaned_data <- correlations_pcs_numeric[, colSums(is.na(correlations_pcs_numeric)) == 0]
+
+test <- t(cleaned_data)
+
+
+
+library(pheatmap)
+# Plot the correlation matrix as a heatmap
+pheatmap(cleaned_data,
+         scale = "none",                # No scaling of the data
+         clustering_distance_rows = "euclidean", # Method for clustering rows (PCs)
+         clustering_distance_cols = "euclidean", # Method for clustering columns (numeric metadata)
+         clustering_method = "complete", # Clustering algorithm (complete linkage)
+         display_numbers = TRUE,         # Display the correlation values inside the tiles
+         fontsize_number = 10,           # Set the font size for the numbers inside the tiles
+         color = colorRampPalette(c("blue", "white", "red"))(100), # Color scale
+         main = "Correlation between PCs and Numeric Metadata"
+)
+
+```
+
+POTENTIALLY DELETE LATER
+Import the SampleIDs from the diversity tests. 
+This is a df where SampleID is a list of 10 urban and 10 rural samples
+These were randomly chosen in 100 iterations. They were narrowed down to 10 
+to cover a uniform distribution of effect sizes
+The goal is to plot # genes from DESeq against these effect sizes 
+to see if greater beta diversity influences gene expression
+```{#r}
+name_to_id <- setNames(meta$SampleID, meta$SampleName)
+
+divergence_10sets <- read.csv("results/docs/divergence_10sets.csv", row.names = 1) %>%
+  mutate(iteration_label = paste0("iteration", row_number())) %>%
+  dplyr::rename(SampleNamelist = SampleID) %>%
+  mutate(
+    SampleIDlist = sapply(strsplit(SampleNamelist, ";"), function(names) {
+      # Translate each SampleName to SampleID
+      sample_ids <- name_to_id[names]
+      # Join the SampleIDs back into a semicolon-separated string
+      paste(sample_ids, collapse = ";")
+    })
+  )
+control_samples <- meta %>% dplyr::filter(coculture=="control") %>% dplyr::select(SampleID) %>%
+ unlist()
+
+iteration_list <- lapply(1:nrow(divergence_10sets), function(i) {
+  # Get the sample names for the current iteration (split by semicolons)
+  sample_names <- strsplit(as.character(divergence_10sets[i, "SampleIDlist"]), ";")[[1]]
+  
+  # Combine with control samples
+  combined_samples <- c(sample_names, control_samples)
+  
+  return(combined_samples)
+})
+
+names(iteration_list) <- divergence_10sets$iteration_label
+
+
+
+```
+
+```{#r}
+# Define the function to run DESeq on the subset of samples
+run_deseq_divergence <- function(sample_ids) {
+  
+  # Subset raw_read_cts_filt and meta based on the sample names
+  raw_read_cts_filt_subset <- raw_read_cts_filt[, sample_ids]
+  meta_subset <- meta[meta$SampleID %in% sample_ids, ]
+  
+  # Ensure that the samples are in the same order
+  meta_subset <- meta_subset[match(sample_ids, meta_subset$SampleID), ]
+  
+  # Create DESeqDataSet and run DESeq
+  dds <- DESeq(DESeqDataSetFromMatrix(
+    countData = raw_read_cts_filt_subset,
+    colData = meta_subset,
+    design = ~Batch + Total.Reads_scaled + urbanism
+  ))
+  
+  res_uc <- results(dds, contrast = c("urbanism", "urban", "control")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ensembl_gene_id")
+
+  res_rc <- results(dds, contrast = c("urbanism", "rural", "control")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ensembl_gene_id")
+  
+  sig_uc <- res_uc %>%
+  dplyr::filter(padj < 0.1)
+  
+  sig_rc <- res_rc %>%
+  dplyr::filter(padj < 0.1)
+  
+  ratio_uc_rc <- nrow(sig_uc) / nrow(sig_rc)
+  
+  return(ratio_uc_rc)
+}
+
+# Apply the function to each iteration in the nested list
+ratio_uc_rc_divergence <- lapply(iteration_list, function(i) {
+  # Run DESeq for each set of sample names in the nested list
+  run_deseq_divergence(i)
+})
+
+iteration_list[1]
+# View the resulting dds_list (a list of DESeq objects)
+str(dds_list)
+
+```
+
+POTENTIALLY DELETE LATER
+Import 100 iterations of different median shannon and corresponding meta
+```{#r}
+shannon100_list <- read.csv("results/docs/shannon100_list.csv", row.names = 1)
+shannon100_nest <- readRDS("results/rds/shannon100_nest.rds")
+
+shannon5_list <- read.csv("results/docs/shannon5_list.csv", row.names = 1)
+shannon5_nest <- readRDS("results/rds/shannon5_nest.rds")
+
+shannon100_random_list <- read.csv("results/docs/shannon100_random_list.csv", row.names = 1)
+shannon100_random_nest <- readRDS("results/rds/shannon100_random_nest.rds")
+
+shannon100_random_urban_list <- read.csv("results/docs/shannon100_random_urban_list.csv", row.names = 1)
+shannon100_random_urban_nest <- readRDS("results/rds/shannon100_random_urban_nest.rds")
+
+shannon100_random_rural_list <- read.csv("results/docs/shannon100_random_rural_list.csv", row.names = 1)
+shannon100_random_rural_nest <- readRDS("results/rds/shannon100_random_rural_nest.rds")
+```
+SampleID to rownames
+```{#r}
+# Assuming 'list' is your list containing dataframes (shannon100_nest)
+shannon100_nest <- lapply(shannon100_nest, function(df) {
+  # Convert the SampleID column to rownames
+  df <- df %>%
+    dplyr::mutate(SampleID2 = SampleID) %>%  
+    tibble::column_to_rownames("SampleID2") %>%
+  .[order(rownames(.)), ]  
+  return(df)
+})
+
+shannon5_nest <- lapply(shannon5_nest, function(df) {
+  df <- data.frame(df) %>%
+    dplyr::mutate(SampleID2 = SampleID) %>%  
+    column_to_rownames("SampleID2") %>%
+  .[order(rownames(.)), ]  
+  return(df)
+})
+
+shannon100_random_nest <- lapply(shannon100_random_nest, function(df) {
+  # Convert the SampleID column to rownames
+  df <- df %>%
+    dplyr::mutate(SampleID2 = SampleID) %>%  
+    tibble::column_to_rownames("SampleID2") %>%
+  .[order(rownames(.)), ]  
+  return(df)
+})
+
+shannon100_random_urban_nest <- lapply(shannon100_random_urban_nest, function(df) {
+  # Convert the SampleID column to rownames
+  df <- df %>%
+    dplyr::mutate(SampleID2 = SampleID) %>%  
+    tibble::column_to_rownames("SampleID2") %>%
+  .[order(rownames(.)), ]  
+  return(df)
+})
+
+shannon100_random_rural_nest <- lapply(shannon100_random_rural_nest, function(df) {
+  # Convert the SampleID column to rownames
+  df <- df %>%
+    dplyr::mutate(SampleID2 = SampleID) %>%  
+    tibble::column_to_rownames("SampleID2") %>%
+  .[order(rownames(.)), ]  
+  return(df)
+})
+```
+
+Function for deseq for this specific shannon nested list
+```{#r}
+run_deseq <- function(cts, meta) {
+
+  # Create DESeqDataSet and run DESeq analysis
+  dds <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = cts,
+      colData = meta,
+      design = ~Batch + Total.Reads_scaled + coculture
+    )
+  )
+  
+  return(dds)
+}
+
+```
+
+
+
+Shannon dds
+```{#r}
+# Run the function over each iteration in shannon100_nest
+shannon100_nest_dds <- lapply(shannon100_nest, function(i) {
+  
+  cts <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% unlist(i$SampleID)]
+  cts <- cts[, order(colnames(cts))]
+  
+  i_filt <- i[rownames(i) %in% (colnames(cts)),]
+  i_filt <- i_filt[order(rownames(i_filt)),]
+  
+  # Run DESeq analysis for this iteration
+  run_deseq(cts, i_filt)
+})
+
+```
+```{#r}
+# Run the function over each iteration in shannon100_nest
+shannon5_nest_dds <- lapply(shannon5_nest, function(i) {
+  
+  cts <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% unlist(i$SampleID)]
+  cts <- cts[, order(colnames(cts))]
+  
+  i_filt <- i[rownames(i) %in% (colnames(cts)),]
+  i_filt <- i_filt[order(rownames(i_filt)),]
+  
+  # Run DESeq analysis for this iteration
+  run_deseq(cts, i_filt)
+})
+
+```
+random
+```{#r}
+shannon100_nest_random_dds <- lapply(shannon100_random_nest, function(i) {
+  
+  cts <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% unlist(i$SampleID)]
+  cts <- cts[, order(colnames(cts))]
+  
+  i_filt <- i[rownames(i) %in% (colnames(cts)),]
+  i_filt <- i_filt[order(rownames(i_filt)),]
+  
+  # Run DESeq analysis for this iteration
+  run_deseq(cts, i_filt)
+})
+
+```
+urban
+```{#ﬁr}
+shannon100_nest_random_urban_dds <- lapply(shannon100_random_urban_nest, function(i) {
+  
+  cts <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% unlist(i$SampleID)]
+  cts <- cts[, order(colnames(cts))]
+  
+  i_filt <- i[rownames(i) %in% (colnames(cts)),]
+  i_filt <- i_filt[order(rownames(i_filt)),]
+  
+  # Run DESeq analysis for this iteration
+  run_deseq(cts, i_filt)
+})
+
+```
+rural
+```{#r}
+shannon100_nest_random_rural_dds <- lapply(shannon100_random_rural_nest, function(i) {
+  
+  cts <- raw_read_cts_filt[, colnames(raw_read_cts_filt) %in% unlist(i$SampleID)]
+  cts <- cts[, order(colnames(cts))]
+  
+  i_filt <- i[rownames(i) %in% (colnames(cts)),]
+  i_filt <- i_filt[order(rownames(i_filt)),]
+  
+  # Run DESeq analysis for this iteration
+  run_deseq(cts, i_filt)
+})
+
+```
+
+
+
+```{#r}
+shannon100_nest_results <- lapply(shannon100_nest_dds, function(dds_obj) {
+  tryCatch({
+    # Get results for the specified contrast
+    res <- results(dds_obj, contrast = c("coculture", "coculture", "control"))
+    
+    # Convert results to a data frame and add ensembl_gene_id column
+    res_df <- as.data.frame(res) %>%
+      rownames_to_column("ensembl_gene_id")
+    
+    return(res_df)
+  }, error = function(e) {
+    message("Skipping iteration due to error: ", e$message)
+    return(NULL)  # Return NULL if there's an error
+  })
+})
+
+```
+
+```{#r}
+shannon100_nest_random_results <- lapply(shannon100_nest_random_dds, function(dds_obj) {
+  tryCatch({
+    # Get results for the specified contrast
+    res <- results(dds_obj, contrast = c("coculture", "coculture", "control"))
+    
+    # Convert results to a data frame and add ensembl_gene_id column
+    res_df <- as.data.frame(res) %>%
+      rownames_to_column("ensembl_gene_id")
+    
+    return(res_df)
+  }, error = function(e) {
+    message("Skipping iteration due to error: ", e$message)
+    return(NULL)  # Return NULL if there's an error
+  })
+})
+
+```
+```{#r}
+shannon100_nest_random_urban_results <- lapply(shannon100_nest_random_urban_dds, function(dds_obj) {
+  tryCatch({
+    # Get results for the specified contrast
+    res <- results(dds_obj, contrast = c("coculture", "coculture", "control"))
+    
+    # Convert results to a data frame and add ensembl_gene_id column
+    res_df <- as.data.frame(res) %>%
+      rownames_to_column("ensembl_gene_id")
+    
+    return(res_df)
+  }, error = function(e) {
+    message("Skipping iteration due to error: ", e$message)
+    return(NULL)  # Return NULL if there's an error
+  })
+})
+
+```
+```{#r}
+shannon100_nest_random_rural_results <- lapply(shannon100_nest_random_rural_dds, function(dds_obj) {
+  tryCatch({
+    # Get results for the specified contrast
+    res <- results(dds_obj, contrast = c("coculture", "coculture", "control"))
+    
+    # Convert results to a data frame and add ensembl_gene_id column
+    res_df <- as.data.frame(res) %>%
+      rownames_to_column("ensembl_gene_id")
+    
+    return(res_df)
+  }, error = function(e) {
+    message("Skipping iteration due to error: ", e$message)
+    return(NULL)  # Return NULL if there's an error
+  })
+})
+
+```
+
+```{#r}
+#saveRDS(shannon100_nest_random_rural_results, "results/rds/shannon100_nest_random_rural_results.rds")
+#saveRDS(shannon100_nest_random_urban_results, "results/rds/shannon100_nest_random_urban_results.rds")
+#saveRDS(shannon100_nest_random_results, "results/rds/shannon100_nest_random_results.rds")
+#saveRDS(shannon100_nest_results, "results/rds/shannon100_nest_results.rds")
+shannon100_nest_results <- readRDS("results/rds/shannon100_nest_results.rds")
+shannon100_nest_random_results <- readRDS("results/rds/shannon100_nest_random_results.rds")
+```
+```{#r}
+shannon100_nest_sig <- lapply(shannon100_nest_results, function(res) {
+    # Get results for the specified contrast
+    res_df <- as.data.frame(res)
+    sig <- res_df %>% dplyr::filter(padj <0.1)
+    
+    return(sig)
+  
+})
+
+shannon100_nest_random_sig <- lapply(shannon100_nest_random_results, function(res) {
+    # Get results for the specified contrast
+    res_df <- as.data.frame(res)
+    sig <- res_df %>% dplyr::filter(padj <0.1)
+    
+    return(sig)
+  
+})
+
+shannon100_nest_random_urban_sig <- lapply(shannon100_nest_random_urban_results, function(res) {
+    # Get results for the specified contrast
+    res_df <- as.data.frame(res)
+    sig <- res_df %>% dplyr::filter(padj <0.1)
+    
+    return(sig)
+  
+})
+
+shannon100_nest_random_rural_sig <- lapply(shannon100_nest_random_rural_results, function(res) {
+    # Get results for the specified contrast
+    res_df <- as.data.frame(res)
+    sig <- res_df %>% dplyr::filter(padj <0.1)
+    
+    return(sig)
+  
+})
+```
+
+```{#r}
+# Collapse the list of significant genes into a single dataframe with iteration and n_sig_genes
+shannon100_nest_sig_summary <- lapply(names(shannon100_nest_sig), function(iter) {
+  # Get the significant genes dataframe for the current iteration
+  sig_df <- shannon100_nest_sig[[iter]]
+  
+  # Count the number of significant genes (rows in the dataframe)
+  n_sig_genes <- nrow(sig_df)
+  
+  # Return a dataframe with iteration and n_sig_genes
+  data.frame(iteration = iter, n_sig_genes = n_sig_genes)
+})
+
+# Combine the results into one dataframe
+shannon100_long <- do.call(rbind, shannon100_nest_sig_summary) %>%
+  merge(shannon100_list[,c("iteration", "median_shannon", "sd_shannon")], by="iteration")
+
+
+```
+```{#r}
+ggplot(shannon100_long, aes(x = n_sig_genes, y = median_shannon)) +
+  geom_point() 
+
+# Fit a linear model
+model <- lm(median_shannon ~ n_sig_genes, data = shannon100_long)
+# Get a summary of the model
+summary(model)
+
+```
+```{#r}
+ggplot(shannon100_long, aes(x = n_sig_genes, y = sd_shannon)) +
+  geom_point() 
+
+# Fit a linear model
+model <- lm(sd_shannon ~ n_sig_genes, data = shannon100_long)
+# Get a summary of the model
+summary(model)
+
+```
+
+```{#r}
+shannon5_nest_results <- lapply(shannon5_nest_dds, function(dds_obj) {
+  tryCatch({
+    # Get results for the specified contrast
+    res <- results(dds_obj, contrast = c("coculture", "coculture", "control"))
+    
+    # Convert results to a data frame and add ensembl_gene_id column
+    res_df <- as.data.frame(res) %>%
+      rownames_to_column("ensembl_gene_id")
+    
+    return(res_df)
+  }, error = function(e) {
+    message("Skipping iteration due to error: ", e$message)
+    return(NULL)  # Return NULL if there's an error
+  })
+})
+
+```
+```{#r}
+shannon5_nest_sig <- lapply(shannon5_nest_results, function(res) {
+    # Get results for the specified contrast
+    res_df <- as.data.frame(res)
+    sig <- res_df %>% dplyr::filter(padj <0.1)
+    
+    return(sig)
+  
+})
+
+```
+
+```{#r}
+# Collapse the list of significant genes into a single dataframe with iteration and n_sig_genes
+shannon5_nest_sig_summary <- lapply(names(shannon5_nest_sig), function(iter) {
+  # Get the significant genes dataframe for the current iteration
+  sig_df <- shannon5_nest_sig[[iter]]
+  
+  # Count the number of significant genes (rows in the dataframe)
+  n_sig_genes <- nrow(sig_df)
+  
+  # Return a dataframe with iteration and n_sig_genes
+  data.frame(group = iter, n_sig_genes = n_sig_genes)
+})
+
+# Combine the results into one dataframe
+shannon5_long <- do.call(rbind, shannon5_nest_sig_summary) %>%
+  merge(shannon5_list, by="group")
+
+
+```
+```{#r}
+ggplot(shannon5_long, aes(x = n_sig_genes, y = median_shannon)) +
+  geom_point() 
+
+# Fit a linear model
+model <- lm(median_shannon ~ n_sig_genes, data = shannon5_long)
+# Get a summary of the model
+summary(model)
+
+```
+
+```{#r}
+# Collapse the list of significant genes into a single dataframe with iteration and n_sig_genes
+shannon100_nest_random_sig_summary <- lapply(names(shannon100_nest_random_sig), function(iter) {
+  # Get the significant genes dataframe for the current iteration
+  sig_df <- shannon100_nest_random_sig[[iter]]
+  
+  # Count the number of significant genes (rows in the dataframe)
+  n_sig_genes <- nrow(sig_df)
+  
+  # Extract the average log2 fold-change value
+  avg_log2fc <- if ("log2FoldChange" %in% colnames(sig_df)) {
+    mean(abs(sig_df$log2FoldChange), na.rm = TRUE) # Avoid NA issues
+  } else {
+    NA # Return NA if log2FoldChange column does not exist
+  }
+  
+  # Return a dataframe with iteration, n_sig_genes, and avg_log2fc
+  data.frame(iteration = iter, n_sig_genes = n_sig_genes, avg_log2fc = avg_log2fc)
+}) 
+
+# Combine the results into one dataframe
+shannon100_random_long <- do.call(rbind, shannon100_nest_random_sig_summary) %>%
+  merge(shannon100_random_list[,c("iteration", "median_shannon", "sd_shannon")], by="iteration")
+
+
+```
+```{#r}
+ggplot(shannon100_random_long, aes(x = n_sig_genes, y = median_shannon)) +
+  geom_point() 
+
+# Fit a linear model
+model <- lm(median_shannon ~ n_sig_genes, data = shannon100_random_long)
+# Get a summary of the model
+summary(model)
+
+ggplot(shannon100_random_long, aes(x = avg_log2fc, y = median_shannon)) +
+  geom_point() 
+
+# Fit a linear model
+model <- lm(median_shannon ~ avg_log2fc, data = shannon100_random_long)
+# Get a summary of the model
+summary(model)
+```
+```{#r}
+# Collapse the list of significant genes into a single dataframe with iteration and n_sig_genes
+shannon100_nest_random_urban_sig_summary <- lapply(names(shannon100_nest_random_urban_sig), function(iter) {
+  # Get the significant genes dataframe for the current iteration
+  sig_df <- shannon100_nest_random_urban_sig[[iter]]
+  
+  # Count the number of significant genes (rows in the dataframe)
+  n_sig_genes <- nrow(sig_df)
+  # Extract the average log2 fold-change value
+  avg_log2fc <- if ("log2FoldChange" %in% colnames(sig_df)) {
+    mean(abs(sig_df$log2FoldChange), na.rm = TRUE) # Avoid NA issues
+  } else {
+    NA # Return NA if log2FoldChange column does not exist
+  }
+  
+  # Return a dataframe with iteration, n_sig_genes, and avg_log2fc
+  data.frame(iteration = iter, n_sig_genes = n_sig_genes, avg_log2fc = avg_log2fc)
+})
+
+# Combine the results into one dataframe
+shannon100_random_urban_long <- do.call(rbind, shannon100_nest_random_urban_sig_summary) %>%
+  merge(shannon100_random_urban_list[,c("iteration", "median_shannon", "sd_shannon")], by="iteration")
+
+
+```
+```{#r}
+ggplot(shannon100_random_urban_long, aes(x = n_sig_genes, y = median_shannon)) +
+  geom_point() 
+
+# Fit a linear model
+model <- lm(median_shannon ~ n_sig_genes, data = shannon100_random_urban_long)
+# Get a summary of the model
+summary(model)
+
+ggplot(shannon100_random_urban_long, aes(x = avg_log2fc, y = median_shannon)) +
+  geom_point() 
+
+# Fit a linear model
+model <- lm(median_shannon ~ avg_log2fc, data = shannon100_random_urban_long)
+# Get a summary of the model
+summary(model)
+```
+```{#r}
+# Collapse the list of significant genes into a single dataframe with iteration and n_sig_genes
+shannon100_nest_random_rural_sig_summary <- lapply(names(shannon100_nest_random_rural_sig), function(iter) {
+  # Get the significant genes dataframe for the current iteration
+  sig_df <- shannon100_nest_random_rural_sig[[iter]]
+  
+  # Count the number of significant genes (rows in the dataframe)
+  n_sig_genes <- nrow(sig_df)
+  
+  # Extract the average log2 fold-change value
+  avg_log2fc <- if ("log2FoldChange" %in% colnames(sig_df)) {
+    mean(abs(sig_df$log2FoldChange), na.rm = TRUE) # Avoid NA issues
+  } else {
+    NA # Return NA if log2FoldChange column does not exist
+  }
+  
+  # Return a dataframe with iteration, n_sig_genes, and avg_log2fc
+  data.frame(iteration = iter, n_sig_genes = n_sig_genes, avg_log2fc = avg_log2fc)
+})
+
+# Combine the results into one dataframe
+shannon100_random_rural_long <- do.call(rbind, shannon100_nest_random_rural_sig_summary) %>%
+  merge(shannon100_random_rural_list[,c("iteration", "median_shannon", "sd_shannon")], by="iteration")
+
+
+```
+```{#r}
+ggplot(shannon100_random_rural_long, aes(x = n_sig_genes, y = median_shannon)) +
+  geom_point() 
+
+# Fit a linear model
+model <- lm(median_shannon ~ n_sig_genes, data = shannon100_random_rural_long)
+# Get a summary of the model
+summary(model)
+
+ggplot(shannon100_random_rural_long, aes(x = avg_log2fc, y = median_shannon)) +
+  geom_point() 
+
+# Fit a linear model
+model <- lm(median_shannon ~ avg_log2fc, data = shannon100_random_rural_long)
+# Get a summary of the model
+summary(model)
+
+```
+
+
+
+
+
+
+
+
+no USA
+```{#r}
+meta_nousa <- meta_noctrl %>% 
+  dplyr::filter(!country=="USA") %>%
+  dplyr::mutate(Shannon = as.numeric(Shannon)) %>%
+  dplyr::mutate(PC1_w = as.numeric(PC1_w))
+raw_read_cts_filt_nousa <- raw_read_cts_filt_noctrl[,meta_nousa$SampleID]
+```
+Only those with a value for shannon
+```{r}
+meta_noshannonNA <- meta_noctrl %>% 
+  dplyr::filter(!is.na(Shannon.y)) 
+raw_read_cts_filt_noshannonNA <- raw_read_cts_filt_noctrl[,meta_noshannonNA$SampleID]
+
+```
+
+Run DESeq model
+```{#r}
+dds <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA,
+      colData = meta_noshannonNA,
+      design= ~Batch + Total.Reads_scaled + Shannon.y))
+```
+Interaction effect
+```{#r}
+dds <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA,
+      colData = meta_noshannonNA,
+      design = ~ Batch + Total.Reads_scaled + urbanism.x + Shannon.y + urbanism.x:Shannon.y
+    )
+)
+
+```
+```{#r}
+res_shannoninteraction <- as.data.frame(results(dds))
+```
+
+```{#r}
+meta_ctrl <- meta %>%
+  dplyr::filter(urbanism.x=="control") %>%
+  dplyr::mutate(Shannon_group=0)
+
+meta_noshannonNA <- meta %>% 
+  dplyr::mutate(PC1_w = as.numeric(PC1_w)) %>%
+  dplyr::filter(!is.na(PC1_w))
+
+meta_noshannonNA_groups <- meta_noshannonNA %>% 
+  arrange(PC1_w) %>%  # Order by Shannon.y
+  mutate(Shannon_group = ntile(PC1_w, 3))  # Split into 3 groups
+
+meta_noshannonNA_group1 <- meta_noshannonNA_groups %>% 
+  dplyr::filter(Shannon_group==1) %>%
+  rbind(meta_ctrl)
+
+meta_noshannonNA_group2 <- meta_noshannonNA_groups %>% 
+  dplyr::filter(Shannon_group==2) %>%
+  rbind(meta_ctrl)
+
+meta_noshannonNA_group3 <- meta_noshannonNA_groups %>% 
+  dplyr::filter(Shannon_group==3) %>%
+  rbind(meta_ctrl)
+
+set.seed(123)
+meta_noshannonNA_random <- meta_noshannonNA_groups %>%
+  slice_sample(n = 20) %>%
+  rbind(meta_ctrl)
+
+raw_read_cts_filt_noshannonNA_group1 <- raw_read_cts_filt[,meta_noshannonNA_group1$SampleID]
+raw_read_cts_filt_noshannonNA_group2 <- raw_read_cts_filt[,meta_noshannonNA_group2$SampleID]
+raw_read_cts_filt_noshannonNA_group3 <- raw_read_cts_filt[,meta_noshannonNA_group3$SampleID]
+raw_read_cts_filt_noshannonNA_random <- raw_read_cts_filt[,meta_noshannonNA_random$SampleID]
+
+print(paste("group1 urban/rural",sum(meta_noshannonNA_group1$urbanism.x == "urban", na.rm = TRUE),
+      sum(meta_noshannonNA_group1$urbanism.x == "rural", na.rm = TRUE)))
+print(paste("group2 urban/rural", sum(meta_noshannonNA_group2$urbanism.x == "urban", na.rm = TRUE),
+      sum(meta_noshannonNA_group2$urbanism.x == "rural", na.rm = TRUE)))
+print(paste("group3 urban/rural", sum(meta_noshannonNA_group3$urbanism.x == "urban", na.rm = TRUE),
+      sum(meta_noshannonNA_group2$urbanism.x == "rural", na.rm = TRUE)))
+print(paste("random urban/rural", sum(meta_noshannonNA_random$urbanism.x == "urban", na.rm = TRUE),
+      sum(meta_noshannonNA_random$urbanism.x == "rural", na.rm = TRUE)))
+
+```
+
+```{#r}
+
+dds_noshannonNA_group1 <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_group1,
+      colData = meta_noshannonNA_group1,
+      design= ~Batch + Total.Reads_scaled + coculture))
+
+dds_noshannonNA_group2 <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_group2,
+      colData = meta_noshannonNA_group2,
+      design= ~Batch + Total.Reads_scaled + coculture))
+
+dds_noshannonNA_group3 <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_group3,
+      colData = meta_noshannonNA_group3,
+      design= ~Batch + Total.Reads_scaled + coculture))
+
+dds_noshannonNA_random <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_random,
+      colData = meta_noshannonNA_random,
+      design= ~Batch + Total.Reads_scaled + coculture))
+```
+
+
+```{#r}
+res_group1 <- results(dds_noshannonNA_group1, contrast=c("coculture", "control", "microbiome")) %>%
+  as.data.frame()
+res_group2 <- results(dds_noshannonNA_group2, contrast=c("coculture", "control", "microbiome")) %>%
+  as.data.frame()
+res_group3 <- results(dds_noshannonNA_group3, contrast=c("coculture", "control", "microbiome")) %>%
+  as.data.frame()
+res_random <- results(dds_noshannonNA_random, contrast=c("coculture", "control", "microbiome")) %>%
+  as.data.frame()
+```
+
+```{#r}
+meta_noshannonNA_noPC1NA_noctrl <- meta %>% 
+  dplyr::filter(!coculture=="control") %>% 
+  dplyr::mutate(PC1_w = as.numeric(PC1_w)) %>%
+  dplyr::filter(!is.na(PC1_w)) %>% 
+  dplyr::mutate(Shannon.y = as.numeric(Shannon.y)) %>%
+  dplyr::filter(!is.na(Shannon.y))
+raw_read_cts_filt_noshannonNA_noPC1NA_noctrl <- raw_read_cts_filt[,meta_noshannonNA_noPC1NA_noctrl$SampleID]
+
+
+dds_noshannonNA_PC1w <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_noPC1NA_noctrl,
+      colData = meta_noshannonNA_noPC1NA_noctrl,
+      design= ~Batch + Total.Reads_scaled + PC1_w))
+
+dds_noshannonNA_PC1w_shannon <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_noPC1NA_noctrl,
+      colData = meta_noshannonNA_noPC1NA_noctrl,
+      design= ~Batch + Total.Reads_scaled + Shannon.y + PC1_w))
+```
+```{#r}
+res_PC1w <- results(dds_noshannonNA_PC1w) %>%
+  as.data.frame()
+res_PC1w_shannon <- results(dds_noshannonNA_PC1w_shannon) %>%
+  as.data.frame()
+```
+
+
+
+Urban and rural only instead of group 1 / group 2
+```{r}
+meta_ctrl <- meta %>%
+  dplyr::filter(urbanism.x=="control") %>%
+  dplyr::mutate(Shannon_group=0) #%>% 
+  #mutate(age_scaled = scale(age)[, 1])
+
+meta_noshannonNA_groups <- meta_noshannonNA %>% 
+  #mutate(age_scaled = scale(age)[, 1]) %>% 
+  arrange(Shannon.y) %>%  # Order by Shannon.y
+  mutate(Shannon_group = ntile(Shannon.y, 2)) 
+
+meta_noshannonNA_groups_urbanism <- meta_noshannonNA %>% 
+  #mutate(age_scaled = scale(age)[, 1]) %>% 
+  arrange(Shannon.y) %>%  # Order by Shannon.y
+  group_by(urbanism.x) %>%
+  mutate(Shannon_group = ntile(Shannon.y, 2)) %>%
+  ungroup() 
+
+set.seed(124)
+meta_noshannonNA_random <- meta_noshannonNA_groups_urbanism %>%
+  slice_sample(n = 20) %>%
+  rbind(meta_ctrl)
+
+setdiff(colnames(meta_noshannonNA_groups_urbanism),colnames(meta_ctrl))
+
+# all
+meta_noshannonNA_group1 <- meta_noshannonNA_groups %>% 
+  dplyr::filter(Shannon_group==1) %>%
+  rbind(meta_ctrl)
+meta_noshannonNA_group2 <- meta_noshannonNA_groups %>% 
+  dplyr::filter(Shannon_group==2) %>%
+  rbind(meta_ctrl)
+
+# urban only
+meta_noshannonNA_urban_group1 <- meta_noshannonNA_groups_urbanism %>% 
+  dplyr::filter(urbanism.x=="urban" & Shannon_group==1) %>%
+  rbind(meta_ctrl)
+
+meta_noshannonNA_urban_group2 <- meta_noshannonNA_groups_urbanism %>% 
+  dplyr::filter(urbanism.x=="urban" & Shannon_group==2) %>%
+  rbind(meta_ctrl)
+
+# rural only
+meta_noshannonNA_rural_group1 <- meta_noshannonNA_groups_urbanism %>% 
+  dplyr::filter(urbanism.x=="rural" & Shannon_group==1) %>%
+  rbind(meta_ctrl)
+
+meta_noshannonNA_rural_group2 <- meta_noshannonNA_groups_urbanism %>% 
+  dplyr::filter(urbanism.x=="rural" & Shannon_group==2) %>%
+  rbind(meta_ctrl)
+
+
+raw_read_cts_filt_noshannonNA_group1 <- raw_read_cts_filt[,meta_noshannonNA_group1$SampleID]
+raw_read_cts_filt_noshannonNA_group2 <- raw_read_cts_filt[,meta_noshannonNA_group2$SampleID]
+
+raw_read_cts_filt_noshannonNA_urban_group1 <- raw_read_cts_filt[,meta_noshannonNA_urban_group1$SampleID]
+raw_read_cts_filt_noshannonNA_urban_group2 <- raw_read_cts_filt[,meta_noshannonNA_urban_group2$SampleID]
+raw_read_cts_filt_noshannonNA_rural_group1 <- raw_read_cts_filt[,meta_noshannonNA_rural_group1$SampleID]
+raw_read_cts_filt_noshannonNA_rural_group2 <- raw_read_cts_filt[,meta_noshannonNA_rural_group2$SampleID]
+raw_read_cts_filt_noshannonNA_random <- raw_read_cts_filt[,meta_noshannonNA_random$SampleID]
+
+print(paste("group1 urban",sum(meta_noshannonNA_urban_group1$urbanism.x == "urban", na.rm = TRUE)))
+print(paste("group2 urban",sum(meta_noshannonNA_urban_group2$urbanism.x == "urban", na.rm = TRUE)))
+print(paste("group1 rural",sum(meta_noshannonNA_rural_group1$urbanism.x == "rural", na.rm = TRUE)))
+print(paste("group2 rural",sum(meta_noshannonNA_rural_group2$urbanism.x == "rural", na.rm = TRUE)))
+print(paste("random urban/rural", sum(meta_noshannonNA_random$urbanism.x == "urban", na.rm = TRUE),
+      sum(meta_noshannonNA_random$urbanism.x == "rural", na.rm = TRUE)))
+
+```
+
+```{r}
+ggplot(meta_noshannonNA, aes(x=urbanism.x, y=Shannon.y)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2)
+
+ggplot(meta_noshannonNA_groups, aes(x=as.factor(Shannon_group), y=Shannon.y)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2)
+
+wilcox.test(Shannon.y ~ urbanism.x, data = meta_noshannonNA)
+
+ggplot(meta_noshannonNA_groups_urbanism, aes(x=factor(Shannon_group), y=Shannon.y)) +
+  facet_wrap(~urbanism.x) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2) 
+
+```
+
+
+```{r}
+dds_noshannonNA_group1 <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_group1,
+      colData = meta_noshannonNA_group1,
+      design= ~Batch + Total.Reads_scaled + coculture))
+
+dds_noshannonNA_group2 <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_group2,
+      colData = meta_noshannonNA_group2,
+      design= ~Batch + Total.Reads_scaled + coculture))
+```
+```{r}
+res_group1 <- results(dds_noshannonNA_group1, contrast=c("coculture", "control", "microbiome")) %>%
+  as.data.frame()
+res_group2 <- results(dds_noshannonNA_group2, contrast=c("coculture", "control", "microbiome")) %>%
+  as.data.frame()
+
+sig_all <- bind_rows(
+  res_group1 %>% filter(padj < 0.1) %>% mutate(group = "Low Diversity"),
+  res_group2 %>% filter(padj < 0.1) %>% mutate(group = "High Diversity"),
+)
+
+sig_all$group <- factor(sig_all$group, levels = c("Low Diversity", "High Diversity"))
+levels(sig_all$group) <- c("Low\nDiversity", "High\nDiversity")
+
+
+degs_plot <- ggplot(sig_all, aes(x=group)) +
+  geom_bar(stat="count") +
+  #scale_fill_manual(values=c("#7B2BC1", "#6FBD8B")) +
+  #facet_wrap(~pop) +
+   theme_minimal() +
+   ylab("Number of DEGs\nTreatment v. Control") 
+
+urbanism_plot <- ggplot(meta_noshannonNA_groups, aes(x = as.factor(Shannon_group), fill = urbanism.x)) +
+  geom_bar(position = "dodge") +
+  geom_text(stat = "count", aes(label = after_stat(count)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("#7B2BC1", "#6FBD8B")) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  ylab("Number of Urban v. Rural")
+
+
+
+effect_plot <- ggplot(sig_all, aes(x = group, y = abs(log2FoldChange))) +
+  geom_boxplot() +
+ # scale_fill_manual(values=c("#7B2BC1", "#6FBD8B")) +
+  #facet_wrap(~pop) +
+  theme_minimal() +
+  ylab("absolute log2 Fold Change\nSignificant Genes Only") 
+
+library(ggpubr)
+ggarrange(urbanism_plot,degs_plot, ncol=2)
+ggsave("results/figs/RNAseq-urbanism/shannon_DEGsbar.png", width=8, height=4)
+```
+
+
+
+
+```{r}
+dds_noshannonNA_urban_group1 <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_urban_group1,
+      colData = meta_noshannonNA_urban_group1,
+      design= ~Batch + Total.Reads_scaled + coculture))
+
+dds_noshannonNA_urban_group2 <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_urban_group2,
+      colData = meta_noshannonNA_urban_group2,
+      design= ~Batch + Total.Reads_scaled + coculture))
+
+dds_noshannonNA_rural_group1 <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_rural_group1,
+      colData = meta_noshannonNA_rural_group1,
+      design= ~Batch + Total.Reads_scaled + coculture))
+
+dds_noshannonNA_rural_group2 <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_rural_group2,
+      colData = meta_noshannonNA_rural_group2,
+      design= ~Batch + Total.Reads_scaled + coculture))
+
+dds_noshannonNA_random <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_noshannonNA_random,
+      colData = meta_noshannonNA_random,
+      design= ~Batch + Total.Reads_scaled + coculture))
+```
+```{r}
+res_urban_group1 <- results(dds_noshannonNA_urban_group1, contrast=c("coculture", "control", "microbiome")) %>%
+  as.data.frame()
+res_urban_group2 <- results(dds_noshannonNA_urban_group2, contrast=c("coculture", "control", "microbiome")) %>%
+  as.data.frame()
+res_rural_group1 <- results(dds_noshannonNA_rural_group1, contrast=c("coculture", "control", "microbiome")) %>%
+  as.data.frame()
+res_rural_group2 <- results(dds_noshannonNA_rural_group2, contrast=c("coculture", "control", "microbiome")) %>%
+  as.data.frame()
+res_random <- results(dds_noshannonNA_random, contrast=c("coculture", "control", "microbiome")) %>%
+  as.data.frame()
+```
+
+
+POSSIBLY DELETE LATER
+Load microbiome data
+```{r}
+## load microbiome data
+# samples are rows, individual taxa are columns
+# column names are like this: 
+# Bacteria;Bacteroidetes;Bacteroidia;Bacteroidales;Prevotellaceae
+
+#microbes <- load_microbiome_abnd(paste0(current_dir,"/input/microbiome_demo_sp_CCA.txt"))
+microbes <- read.csv("results/docs/clr_filt_microbe_abundances.csv") %>%
+  dplyr::rename("SampleName"=X) %>%
+  left_join(meta[c("SampleName", "SampleID")],by="SampleName") %>%
+  dplyr::filter(SampleID %in% meta$SampleID) %>%
+  dplyr::select(-SampleName) %>%
+  column_to_rownames("SampleID") %>%
+  as.matrix()
+microbes <- microbes[order(rownames(microbes)),] 
+
+dorea_roseburia <- microbes %>% 
+  as.data.frame() %>% 
+  dplyr::select(Dorea, 
+                Roseburia, 
+                Dorea_sp, 
+                Roseburia_sp_1, 
+                Roseburia_faecis,
+                Roseburia_intestinalis,
+                Eubacterium_rectale,
+                Clostridium,
+                Sutterella) %>%
+  rownames_to_column("SampleID")
+```
+```{r}
+meta_noshannonNA_groups_urbanism_dorea_roseburia <- meta_noshannonNA_groups_urbanism %>%
+  left_join(dorea_roseburia, by="SampleID") %>%
+  arrange(Shannon.y)
+
+meta_noshannonNA_groups_urbanism_dorea_roseburia$SampleID <- factor(meta_noshannonNA_groups_urbanism_dorea_roseburia$SampleID)
+
+ggplot(meta_noshannonNA_groups_urbanism_dorea_roseburia, aes(x=Shannon.y, y= Roseburia_intestinalis)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE, color = "green") +
+  facet_grid(~urbanism.x, space="free", scales="free") 
+```
+```{r}
+# Rural Model
+model_rural <- lm(Roseburia_intestinalis ~ Shannon.y, data = subset(meta_noshannonNA_groups_urbanism_dorea_roseburia, urbanism.x == "rural"))
+summary(model_rural)
+
+# Urban Model
+model_urban <- lm(Roseburia_intestinalis ~ Shannon.y, data = subset(meta_noshannonNA_groups_urbanism_dorea_roseburia, urbanism.x == "urban"))
+summary(model_urban)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Run DESeq model
 ```{r}
 dds <- DESeq(
     DESeqDataSetFromMatrix(
       countData = raw_read_cts_filt,
       colData = meta,
-      design= ~Batch + urbanism))
+      design= ~Batch + Total.Reads_scaled + urbanism))
 ```
+
+
 ```{r}
+resultsNames(dds)
+```
+```{#r}
+res_Axis1_genus_scaled <- results(dds, name = "Axis1_genus_scaled") %>% as.data.frame()
+```
+
+```{#r}
+library(ggplot2)
+library(dplyr)
+
+# Set significance threshold
+sig_threshold <- 0.1
+
+# Prepare the data for plotting
+res_Axis1_genus_scaled$logP <- -log10(res_Axis1_genus_scaled$pvalue)
+res_Axis1_genus_scaled$Significant <- res_Axis1_genus_scaled$padj< sig_threshold
+
+# Create labels based on the l2fc direction
+res_Axis1_genus_scaled$Label <- ifelse(res_Axis1_genus_scaled$log2FoldChange > 0, 
+                                       "Upregulated in Urban", 
+                                       ifelse(res_Axis1_genus_scaled$log2FoldChange < 0, 
+                                              "Upregulated in Rural", 
+                                              ""))
+
+# Generate the volcano plot
+ggplot(res_Axis1_genus_scaled, aes(x = log2FoldChange, y = logP)) +
+  geom_point(aes(color = Significant), alpha = 0.7, size = 2) +
+  scale_color_manual(values = c("grey", "red")) +
+  labs(title = "Volcano Plot of Gene Expression\nBased on Axis1 (Urbanization)", 
+       x = "log2 Fold Change", 
+       y = "-log10 p-value") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+  geom_hline(yintercept = -log10(sig_threshold), linetype = "dashed", color = "gray") +
+  
+  # Add arrows and text under the x-axis
+  annotate("text", x = 0.5, y = -1, label = "More enriched in Urban", size = 3, hjust = 0.5) +
+  annotate("text", x = -0.5, y = -1, label = "More enriched in Rural", size = 3, hjust = 0.5) +
+  annotate("segment", x = 0, xend = -1, y = -0.2, yend = -0.2, 
+           arrow = arrow(type = "closed", length = unit(0.2, "inches")), size = 1) +  # Arrow pointing left
+  annotate("segment", x = 0, xend = 1, y = -0.2, yend = -0.2, 
+           arrow = arrow(type = "closed", length = unit(0.2, "inches")), size = 1)  # Arrow pointing right
+
+
+```
+
+
+
+```{#r}
+res_urbanism <- results(dds, contrast = c("urbanism", "rural", "urban")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ensembl_gene_id")
+```
+
+```{#r}
 dds2 <- DESeq(
     DESeqDataSetFromMatrix(
       countData = raw_read_cts_filt,
       colData = meta,
-      design= ~Batch + Total.Reads + coculture))
-```
+      design= ~Batch + Total.Reads + coculture)) # age + sex + country #coculture_country
 
-```{r}
-vsd <- vst(dds2)
+```
+```{#r}
+vsd <- vst(dds)
 plotPCA(vsd, "Batch")
 plotPCA(vsd, "coculture")
 plotPCA(vsd, "urbanism")
@@ -98,8 +1302,82 @@ assay(vsd) <- limma::removeBatchEffect(assay(vsd), vsd$Batch)
 plotPCA(vsd, "Batch")
 plotPCA(vsd, "coculture")
 plotPCA(vsd, "urbanism")
+plotPCA(vsd, "country")
+plotPCA(vsd, "Total.Reads_scaled")
 ```
-```{r}
+```{#r}
+#vsd_filtered <- vsd[, colnames(vsd) %in% meta_noctrl$SampleID]
+
+# Calculate sample-to-sample distances
+sample_dist <- dist(t(assay(vsd)))
+
+
+# Convert the distance matrix to a matrix format
+sample_dist_matrix <- as.matrix(sample_dist)
+
+
+annotation <- data.frame(Country = meta$country,
+                         Urbanism = meta$urbanism)
+
+rownames(annotation) <- colnames(sample_dist_matrix)
+
+annotation_colors <- list(
+    Country = c(
+        Rwanda = "blue",
+        Ghana = "green",
+        Nigeria = "red",
+        Malaysia = "yellow",  # color for control samples, if applicable
+        USA = "orange",
+        control = "white"),
+    Urbanism = c(
+      control = "white",
+      rural = "black",
+      urban = "grey")
+)
+
+# Plot with pheatmap
+library(pheatmap)
+p <- pheatmap(sample_dist_matrix, 
+         annotation_row = annotation,
+         annotation_colors = annotation_colors,
+         main = "Sample Clustering by Country",
+         cutree_rows = 3,
+         clustering_distance_rows = sample_dist,
+         clustering_distance_cols = sample_dist,
+         show_rownames = FALSE,
+         show_colnames = T)
+p
+```
+
+
+Show just urban v. control and rural v. control
+```{#r}
+# Filter the VSD object for the first condition
+vsd_control_urban <- vsd[, vsd$urbanism %in% c("control", "urban")]
+
+# Plot PCA for the subsetted data
+plotPCA(vsd_control_urban, "country") +
+  scale_color_manual(values = c("control" = "black", 
+                                Rwanda = "blue",
+                                Ghana = "green",
+                                Nigeria = "red",
+                                Malaysia = "yellow",
+                                USA = "orange")) 
+
+vsd_control_rural <- vsd[, vsd$urbanism %in% c("control", "rural")]
+
+# Plot PCA for the subsetted data
+plotPCA(vsd_control_rural, "country") +
+    scale_color_manual(values = c("control" = "black", 
+                                Rwanda = "blue",
+                                Ghana = "green",
+                                Nigeria = "red",
+                                Malaysia = "yellow",
+                                USA = "orange")) 
+
+```
+
+```{#r}
 pcaData <- plotPCA(vsd, intgroup=c("coculture", "urbanism", "Batch", "SampleName"), returnData=TRUE)
 percentVar <- round(100 * attr(pcaData, "percentVar"))
 ggplot(pcaData, aes(PC1, PC2, color=Batch, label=name)) +
@@ -108,35 +1386,300 @@ ggplot(pcaData, aes(PC1, PC2, color=Batch, label=name)) +
   ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
   coord_fixed()
 ```
+```{#r}
+resultsNames(dds)
+```
+```{#r}
+results_urban_vs_rural <- results(dds, 
+                                  alpha= 0.05,
+                                  contrast = list("urbanism_rural_vs_control", 
+                                                       "urbanism_urban_vs_control")) %>%
+  as.data.frame()
+```
+```{#r}
+res_urbanism <- results(dds, alpha= 0.05, contrast = c("urbanism", "rural", "urban")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ensembl_gene_id")
+```
 
+```{#r}
+ggplot(results_urban_vs_rural, aes(x = log2FoldChange)) +
+  geom_density(adjust = 2, fill = "skyblue", alpha = 0.6) + # Adjust smoothing
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", size = 1) +
+  labs(
+    title = "Smoothed Density Plot of Log2 Fold Change",
+    x = "Log2 Fold Change (l2fc)",
+    y = "Density"
+  ) +
+  theme_minimal()
+
+```
+
+```{#r}
+ggplot(results_urban_vs_rural, aes(x = log2FoldChange)) +
+  geom_density(fill = "skyblue", alpha = 0.6) +
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", size = 1) +
+  coord_cartesian(xlim = c(-0.5, 0.5)) + # Focus on a narrower range
+  labs(
+    title = "Zoomed-In Density Plot",
+    x = "Log2 Fold Change (l2fc)",
+    y = "Density"
+  ) +
+  theme_minimal()
+```
+
+
+```{#r}
+results_urban_vs_rural <- results_urban_vs_rural %>%
+  arrange(desc(abs(log2FoldChange))) %>%
+  mutate(gene = rownames(results_urban_vs_rural))
+
+ggplot(results_urban_vs_rural[1:50, ], aes(x = reorder(gene, log2FoldChange), y = log2FoldChange)) +
+  geom_segment(aes(xend = gene, y = 0, yend = log2FoldChange), color = "gray") +
+  geom_point(size = 3, aes(color = log2FoldChange > 0)) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  coord_flip() +
+  labs(
+    title = "Top 50 Genes by Log2 Fold Change",
+    x = "Genes",
+    y = "Log2 Fold Change"
+  ) +
+  theme_minimal()
+
+
+```
+
+```{#r}
+resultsNames(dds)
+```
 
 Results
 ```{r}
-res_coculture <- results(dds2, contrast = c("coculture", "microbiome", "control")) %>%
-  as.data.frame() %>%
-  rownames_to_column("ensembl_gene_id")
   
-res_uc <- results(dds, contrast = c("urbanism", "urban", "control")) %>%
+#res_coculture <- results(dds2, contrast = c("coculture", "microbiome", "control")) %>%
+#  as.data.frame() %>%
+#  rownames_to_column("ensembl_gene_id")
+
+#res_shannon <- results(dds) %>%
+#  as.data.frame() %>%
+#  rownames_to_column("ensembl_gene_id")
+
+
+res_uc <- results(dds, name = "urbanism_urban_vs_control") %>%
   as.data.frame() %>%
   rownames_to_column("ensembl_gene_id")
 
-res_rc <- results(dds, contrast = c("urbanism", "rural", "control")) %>%
+res_rc <- results(dds, name = "urbanism_rural_vs_control") %>%
   as.data.frame() %>%
   rownames_to_column("ensembl_gene_id")
 
-res_ur <- results(dds, contrast = c("urbanism", "urban", "rural")) %>%
+res_ur <- results(dds, name = "urbanism_urban_vs_rural") %>%
   as.data.frame() %>%
   rownames_to_column("ensembl_gene_id")
 ```
 
 
+
 Filter for significance
 ```{r}
-sig_coculture <- res_coculture %>%
+#sig_shannon <- res_shannon %>%
+#  dplyr::filter(padj<0.1) %>%
+  #dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
+#  mutate(model="sig_shannon")
+
+#sig_urbanism <- res_urbanism %>%
+#  dplyr::filter(padj<0.1) %>%
+  #dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
+#  mutate(model="sig_urbanism")
+
+#sig_coculture <- res_coculture %>%
+#  dplyr::filter(padj<0.1) %>%
+  #dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
+#  mutate(model="sig_coculture")
+  
+sig_uc <- res_uc %>%
   dplyr::filter(padj<0.1) %>%
   #dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
-  mutate(model="sig_coculture")
+  mutate(model="sig_uc")
+
+sig_uc_up <- sig_uc %>% dplyr::filter(log2FoldChange>0)
+sig_uc_down <- sig_uc %>% dplyr::filter(log2FoldChange<0)
+
+write.csv(sig_uc_up, "results/docs/sig_uc_up.csv")
+write.csv(sig_uc_down, "results/docs/sig_uc_down.csv")
+
+sig_rc <- res_rc %>%
+  dplyr::filter(padj<0.1) %>%
+  #dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
+  mutate(model="sig_rc")
+
+sig_rc_up <- sig_rc %>% dplyr::filter(log2FoldChange>0)
+sig_rc_down <- sig_rc %>% dplyr::filter(log2FoldChange<0)
+
+write.csv(sig_rc_up, "results/docs/sig_rc_up.csv")
+write.csv(sig_rc_down, "results/docs/sig_rc_down.csv")
+
+#sig_ur <- res_ur %>%
+  #dplyr::filter(padj<0.1)
+
+# union (663 genes)
+sigenes_ucrc <- unique(as.list(sig_uc$ensembl_gene_id, sig_rc$ensembl_gene_id))
+
+# intersect (292 genes)
+#sigenes_ucrc <- intersect(sig_uc$ensembl_gene_id, sig_rc$ensembl_gene_id)
+
+```
+```{r}
+# Count positive log2foldchange for significant results
+#pos_uc <- sum(res_uc$log2FoldChange > 0)
+#pos_rc <- sum(res_rc$log2FoldChange > 0)
+
+pos_uc <- sum(res_uc$log2FoldChange > 0)
+pos_rc <- sum(res_rc$log2FoldChange > 0)
+
+# Total significant results in each model
+total_uc <- nrow(res_uc)
+total_rc <- nrow(res_rc)
+
+# Proportion of positives in rural model
+expected_p <- pos_rc / total_rc
+
+# Binomial test for the urban model
+binom_test_uc <- binom.test(x = pos_uc, n = total_uc, p = expected_p, alternative = "greater")
+binom_test_uc
+
+```
+```{r}
+sigucrc_numbers <- data_frame(urbanism=c("urban", "rural"),
+                              DEGs=c(nrow(sig_uc), nrow(sig_rc)),
+                              pos_DEGs = c(nrow(sig_uc_up), nrow(sig_rc_up)),
+                              neg_DEGs = c(nrow(sig_uc_down), nrow(sig_rc_down)))
+ggplot(sigucrc_numbers, aes(x=urbanism, y=DEGs)) +
+  geom_bar(stat="identity") +
+  ylim(values=c(0,700))
+ggplot(sigucrc_numbers, aes(x=urbanism, y=pos_DEGs)) +
+  geom_bar(stat="identity") +
+  ylim(values=c(0,700))
+ggplot(sigucrc_numbers, aes(x=urbanism, y=neg_DEGs)) +
+  geom_bar(stat="identity") +
+  ylim(values=c(0,700))
+```
+
+test to compare standard deviations
+```{r}
+wilcox_test_se <- wilcox.test(sig_uc$lfcSE, sig_rc$lfcSE)
+print(wilcox_test_se)
+
+```
+
+Function to calculate z scores in order to test for significance between uc and rc coefficients
+```{#r}
+compare_deseq_results <- function(res_df1, res_df2, method = "fdr") {
+  # Ensure both data frames have the necessary columns
+  required_cols <- c("log2FoldChange", "lfcSE")
+  if (!all(required_cols %in% colnames(res_df1)) || !all(required_cols %in% colnames(res_df2))) {
+    stop("Both data frames must contain 'log2FoldChange' and 'lfcSE' columns.")
+  }
   
+  sig_df1 <- res_df1 %>% dplyr::filter(ensembl_gene_id %in% sigenes_ucrc) 
+  sig_df2 <- res_df2 %>% dplyr::filter(ensembl_gene_id %in% sigenes_ucrc) 
+  
+  # only consider genes with l2fc > 0.1 in at least one of the models
+  #sigenes_l2fc <- rbind(sig_df1, sig_df2) %>%
+  #  dplyr::filter(abs(log2FoldChange) > 0.1)
+  
+  #sig_df1_filt <- sig_df1 %>% dplyr::filter(ensembl_gene_id %in% sigenes_l2fc$ensembl_gene_id) 
+  #sig_df2_filt <- sig_df2 %>% dplyr::filter(ensembl_gene_id %in% sigenes_l2fc$ensembl_gene_id) 
+  
+  # Calculate z-scores
+  z_scores <- (res_df1$log2FoldChange - res_df2$log2FoldChange) / 
+              sqrt(res_df1$lfcSE^2 + res_df2$lfcSE^2)
+  
+  # Calculate p-values
+  p_values <- 2 * pnorm(-abs(z_scores))
+  
+  # Adjust p-values using the specified method
+  adjusted_p <- p.adjust(p_values, method = method)
+  
+  # Return a data frame with results
+  result <- data.frame(
+    gene = res_df1$ensembl_gene_id,
+    log2FoldChange_diff = res_df1$log2FoldChange - res_df2$log2FoldChange,
+    z_score = z_scores,
+    p_value = p_values,
+    adjusted_p_value = adjusted_p
+  )
+  
+  return(result)
+}
+
+res_ucrc_comparison <- compare_deseq_results(res_uc, res_rc)
+```
+```{#r}
+# Generate the volcano plot
+ggplot(res_ucrc_comparison, aes(x = log2FoldChange_diff, y = -log10(p_value))) +
+  geom_point(alpha = 0.7, size = 2) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+  geom_hline(yintercept = -log10(0.1), linetype = "dashed", color = "gray") +
+
+  # Add arrows and text under the x-axis
+  annotate("text", x = 0.15, y = -0.3, label = "Stronger effect in Urban", size = 4, hjust = 0.5) +
+  annotate("text", x = -0.15, y = -0.3, label = "Stronger effect in Rural", size = 4, hjust = 0.5) +
+  annotate("segment", x = 0, xend = -0.4, y = -0.2, yend = -0.2, 
+           arrow = arrow(type = "closed", length = unit(0.2, "inches")), size = 0.5) +  # Arrow pointing left
+  annotate("segment", x = 0, xend = 0.4, y = -0.2, yend = -0.2, 
+           arrow = arrow(type = "closed", length = unit(0.2, "inches")), size = 0.5)  # Arrow pointing right
+```
+
+
+
+
+```{#r}
+library(EnhancedVolcano)
+
+EnhancedVolcano(res_uc,
+    lab = NA,
+    x = 'log2FoldChange',
+    y = 'padj',
+    xlim = c(-1, 1),
+    ylim = c(-0.05, 12),
+    pCutoff = 0.1,
+    FCcutoff = 0.1,
+    pointSize = 1.0,
+    labSize = 6.0)
+
+EnhancedVolcano(res_rc,
+    lab = NA,
+    x = 'log2FoldChange',
+    y = 'padj',
+    xlim = c(-1, 1),
+    ylim = c(-0.05, 12),
+    pCutoff = 0.1,
+    FCcutoff = 0.1,
+    pointSize = 1.0,
+    labSize = 6.0)
+
+EnhancedVolcano(res_ur,
+    lab = NA,
+    x = 'log2FoldChange',
+    y = 'padj',
+    xlim = c(-1, 1),
+    ylim = c(-0.05, 12),
+    pCutoff = 0.1,
+    FCcutoff = 0.1,
+    pointSize = 1.0,
+    labSize = 6.0)
+```
+
+
+
+
+
+Filter for significance
+```{r}
 sig_uc <- res_uc %>%
   dplyr::filter(padj<0.1) %>%
   #dplyr::filter(log2FoldChange > 0.1 | log2FoldChange < -0.1) %>%
@@ -152,21 +1695,8 @@ sig_rc <- res_rc %>%
 
 sig_rc_up <- sig_rc %>% dplyr::filter(log2FoldChange>0)
 sig_rc_down <- sig_rc %>% dplyr::filter(log2FoldChange<0)
+```
 
-sig_ur <- res_ur %>%
-  dplyr::filter(padj<0.1)
-```
-```{r}
-library(EnhancedVolcano)
-EnhancedVolcano(res_uc,
-    lab = NA,
-    x = 'log2FoldChange',
-    y = 'pvalue',
-    pCutoff = 0.1,
-    FCcutoff = 0.1,
-    pointSize = 3.0,
-    labSize = 6.0)
-```
 
 L2FC scatterplot
 ```{r}
@@ -201,6 +1731,7 @@ res_uc_rc <- merge(
                          color_group == "z_Non-sig" ~ "z_Non-sig")) %>%
   mutate(abs_l2fc_uc = abs(log2FoldChange_uc)) %>%
   mutate(abs_l2fc_rc = abs(log2FoldChange_rc)) %>%
+  mutate(ratio_l2fc = abs_l2fc_uc/ abs_l2fc_rc) %>%
   arrange(desc(color_group))
 ```
 Find most extreme genes belonging to uc or rc
@@ -230,13 +1761,13 @@ res_uc_rc_v2 <- res_uc_rc %>%
 ```
 
 ```{r}
-ggplot(res_uc_rc, aes(x=neg_log10_pvalue_uc, y=neg_log10_pvalue_rc, color=color_group, fill=sig, shape=sig, size=sig)) +
+ggplot(res_uc_rc, aes(y=neg_log10_pvalue_uc, x=neg_log10_pvalue_rc, color=color_group, fill=sig, shape=sig, size=sig)) +
   geom_point(alpha=0.5) +
   scale_shape_manual(values=c(19,3)) +
   scale_color_manual(values=c("#6FBD8B", "grey20", "#7B2BC1", "grey80")) + 
   scale_size_manual(values=c(1,1)) +
   geom_abline(linetype="dashed")+
-  geom_smooth(data = subset(res_uc_rc_v2, sig == "Sig"), method = "lm", se = FALSE, size=0.5, color="indianred3") +
+  #geom_smooth(aes(group = 1), method = "lm", se = FALSE, size=0.5, color="indianred3") +
   xlab("neglog10 p: Industrialized vs control") +
   ylab("neglog10 p: Non-industrialized vs control") +
   #xlim(values=c(-0.75,0.75)) +
@@ -250,9 +1781,325 @@ ggplot(res_uc_rc, aes(x=neg_log10_pvalue_uc, y=neg_log10_pvalue_rc, color=color_
 ggsave("results/figs/RNAseq-urbanism/pval_dist.png", width=4, height=3)
 
 ```
+```{#r}
+ggplot(res_uc_rc, aes(x = neg_log10_pvalue_uc, y = neg_log10_pvalue_rc)) +
+  geom_density_2d_filled(alpha = 0.8, breaks= c(0,10^-5, 10^-4,10^-3,10^-2,10^-1,1)) +
+  geom_abline(linetype = "dashed", color = "black") +
+  xlab("neglog10 p: Industrialized vs control") +
+  ylab("neglog10 p: Non-industrialized vs control") +
+  xlim(c(0, 12.5)) +
+  ylim(c(0, 12.5)) +
+  theme_linedraw() +
+  coord_fixed()
+
+```
+
+
+```{r}
+ggplot(res_uc_rc, aes(y=abs_l2fc_uc, x=abs_l2fc_rc, color=color_group, fill=sig, shape=sig, size=sig)) +
+  geom_point(alpha=0.5) +
+  scale_shape_manual(values=c(19,3)) +
+  scale_color_manual(values=c("#6FBD8B", "grey20", "#7B2BC1", "grey80")) + 
+  scale_size_manual(values=c(1,1)) +
+  geom_abline(linetype="dashed")+
+  #geom_smooth(aes(group = 1), method = "lm", se = FALSE, size=0.5, color="indianred3") +
+  xlab("neglog10 p: Industrialized vs control") +
+  ylab("neglog10 p: Non-industrialized vs control") +
+  xlim(values=c(0,0.75)) +
+  ylim(values=c(0,0.75)) +
+  theme_linedraw() + 
+  coord_fixed() +
+  theme(legend.position="none")
+
+ggsave("results/figs/RNAseq-urbanism/l2fc_dist.png", width=4, height=3)
+
+```
+```{#r}
+# Fit the linear model
+lm_model_rcuc <- lm(abs_l2fc_rc ~ abs_l2fc_uc, data = res_uc_rc)
+lm_model_ucrc <- lm(abs_l2fc_uc ~ abs_l2fc_rc, data = res_uc_rc)
+
+# Get the coefficients
+coefficients_rcuc <- coef(lm_model_rcuc)
+coefficients_ucrc <- coef(lm_model_ucrc)
+
+# Extract the slope and intercept
+slope_rcuc <- coefficients_rcuc[2]  # The second coefficient is the slope (m)
+slope_ucrc <- coefficients_ucrc[2]
+intercept_rcuc <- coefficients_rcuc[1]  # The first coefficient is the intercept (b)
+intercept_ucrc <- coefficients_ucrc[1]
+
+# Print the equation of the line
+cat("Equation of the line rc ~ uc: y =", slope_rcuc, "* x +", intercept_rcuc, "\n") 
+cat("Equation of the line uc ~ rc: y =", slope_ucrc, "* x +", intercept_ucrc, "\n")
+```
+While both equations indicate a positive relationship, the steeper slope of the uc ~ rc model suggests that
+urban fold changes react more significantly to changes in rural fold changes.
+
+```{#r}
+ggplot(res_uc_rc, aes(x = ratio_l2fc + 1e-6)) +
+  geom_histogram(binwidth = 0.1, fill = "lightblue", color = "black") +
+  xlab("Ratio of uc to rc (uc/rc)") +
+  ylab("Count") +
+  ggtitle("Distribution of uc/rc Ratios") +
+  theme_minimal() +
+  scale_y_log10() +
+  scale_x_log10() 
+
+
+```
+
+```{#r}
+nrow(dplyr::filter(res_uc_rc, ratio_l2fc > 1)) / nrow(res_uc_rc)
+nrow(dplyr::filter(res_uc_rc, ratio_l2fc < 1)) /nrow(res_uc_rc)
+
+nrow(dplyr::filter(res_uc_rc, ratio_l2fc > 100)) / nrow(res_uc_rc)
+nrow(dplyr::filter(res_uc_rc, ratio_l2fc < 0.01)) /nrow(res_uc_rc)
+```
+
+
+For supplement: divy up by country
+```{#r}
+meta_Rwanda <- meta %>% dplyr::filter(country %in% c("Rwanda", "control"))
+raw_read_cts_filt_Rwanda <- raw_read_cts_filt[,meta_Rwanda$SampleID]
+
+meta_Ghana <- meta %>% dplyr::filter(country %in% c("Ghana", "control"))
+raw_read_cts_filt_Ghana <- raw_read_cts_filt[,meta_Ghana$SampleID]
+
+meta_Nigeria <- meta %>% dplyr::filter(country %in% c("Nigeria", "control"))
+raw_read_cts_filt_Nigeria <- raw_read_cts_filt[,meta_Nigeria$SampleID]
+
+meta_Malaysia <- meta %>% dplyr::filter(country %in% c("Malaysia", "control"))
+raw_read_cts_filt_Malaysia <- raw_read_cts_filt[,meta_Malaysia$SampleID]
+```
+
+
+```{#r}
+dds2_Rwanda <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_Rwanda,
+      colData = meta_Rwanda,
+      design= ~Batch + Total.Reads + urbanism))
+
+dds2_Ghana <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_Ghana,
+      colData = meta_Ghana,
+      design= ~Batch + Total.Reads + urbanism))
+
+dds2_Nigeria <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_Nigeria,
+      colData = meta_Nigeria,
+      design= ~Batch + Total.Reads + urbanism))
+
+dds2_Malaysia <- DESeq(
+    DESeqDataSetFromMatrix(
+      countData = raw_read_cts_filt_Malaysia,
+      colData = meta_Malaysia,
+      design= ~Batch + Total.Reads + urbanism))
+```
+
+```{#r}
+analyze_deseq_contrasts <- function(dds, contrasts = list(c("urbanism", "urban", "control"), c("urbanism", "rural", "control")), padj_threshold = 0.1, top_n = 100) {
+  
+  # Define the result contrasts
+  res_uc <- results(dds, contrast = contrasts[[1]]) %>%
+    as.data.frame() %>%
+    rownames_to_column("ensembl_gene_id")
+  
+  res_rc <- results(dds, contrast = contrasts[[2]]) %>%
+    as.data.frame() %>%
+    rownames_to_column("ensembl_gene_id")
+  
+  # Filter for significance and create subsets
+  sig_uc <- res_uc %>%
+    dplyr::filter(padj < padj_threshold) %>%
+    mutate(model = "sig_uc")
+  sig_uc_up <- sig_uc %>% dplyr::filter(log2FoldChange > 0)
+  sig_uc_down <- sig_uc %>% dplyr::filter(log2FoldChange < 0)
+  
+  sig_rc <- res_rc %>%
+    dplyr::filter(padj < padj_threshold) %>%
+    mutate(model = "sig_rc")
+  sig_rc_up <- sig_rc %>% dplyr::filter(log2FoldChange > 0)
+  sig_rc_down <- sig_rc %>% dplyr::filter(log2FoldChange < 0)
+  
+  # Shared and unique genes
+  sig_shared <- intersect(sig_uc$ensembl_gene_id, sig_rc$ensembl_gene_id)
+  sig_uc_only <- sig_uc %>% dplyr::filter(!ensembl_gene_id %in% sig_shared)
+  sig_rc_only <- sig_rc %>% dplyr::filter(!ensembl_gene_id %in% sig_shared)
+  
+  return_list <- list(res_uc, res_rc, sig_shared, sig_uc_only, sig_rc_only)
+  
+}
+```
+```{#r}
+# Example usage:
+Rwanda_results <- analyze_deseq_contrasts(dds2_Rwanda)
+Ghana_results <- analyze_deseq_contrasts(dds2_Ghana)
+Nigeria_results <- analyze_deseq_contrasts(dds2_Nigeria)
+Malaysia_results <- analyze_deseq_contrasts(dds2_Malaysia)
+```
+
+```{#r}
+scatterplot_dds <- function(res_list, title) {
+  
+  res_uc <- res_list[[1]]
+  res_rc <- res_list[[2]]
+  sig_shared <- res_list[[3]]
+  sig_uc_only <- res_list[[4]]
+  sig_rc_only <- res_list[[5]]
+  
+# Prepare data for L2FC scatter plot
+  res_uc_lab <- res_uc %>%
+    dplyr::select(ensembl_gene_id, log2FoldChange, padj, pvalue) %>%
+    mutate(neg_log10_pvalue = -log10(pvalue),
+           neg_log10_padj = -log10(padj)) %>%
+    rename_with(~paste0(., "_uc"), -1)
+  
+  res_rc_lab <- res_rc %>%
+    dplyr::select(ensembl_gene_id, log2FoldChange, padj, pvalue) %>%
+    mutate(neg_log10_pvalue = -log10(pvalue),
+           neg_log10_padj = -log10(padj)) %>%
+    rename_with(~paste0(., "_rc"), -1)
+  
+  # Merge results
+  res_uc_rc <- merge(
+    res_uc_lab[, c("ensembl_gene_id", "log2FoldChange_uc", "padj_uc", "neg_log10_padj_uc", "pvalue_uc", "neg_log10_pvalue_uc")], 
+    res_rc_lab[, c("ensembl_gene_id", "log2FoldChange_rc", "padj_rc", "neg_log10_padj_rc", "pvalue_rc", "neg_log10_pvalue_rc")], 
+    by = "ensembl_gene_id"
+  ) %>%
+    mutate(color_group = case_when(
+      ensembl_gene_id %in% sig_shared ~ "Shared",
+      ensembl_gene_id %in% sig_rc_only$ensembl_gene_id ~ "Rural only",
+      ensembl_gene_id %in% sig_uc_only$ensembl_gene_id ~ "Urban only",
+      TRUE ~ "Non-sig"
+    )) %>%
+    mutate(sig = ifelse(color_group != "Non-sig", "Sig", "Non-sig")) %>%
+    mutate(abs_l2fc_uc = abs(log2FoldChange_uc),
+           abs_l2fc_rc = abs(log2FoldChange_rc)) %>%
+    mutate(ratio_l2fc = abs_l2fc_uc/ abs_l2fc_rc) %>%
+    arrange(color_group)
+  
+ 
+  ggplot(res_uc_rc, aes(x=abs_l2fc_uc, y=abs_l2fc_rc, color=color_group, fill=sig, shape=sig, size=sig)) +
+  geom_point(alpha=0.5) +
+  scale_shape_manual(values=c(3,19)) +
+  scale_color_manual(values=c("grey80","#6FBD8B", "grey20", "#7B2BC1")) + 
+  scale_size_manual(values=c(1,1)) +
+  geom_abline(linetype="dashed")+
+  xlab("l2fc: Industrialized vs control") +
+  ylab("l2fc: Non-industrialized vs control") +
+  xlim(values=c(0,0.75)) +
+  ylim(values=c(0,0.75)) +
+  theme_linedraw() + 
+  coord_fixed() +
+  theme(legend.position="none") +
+  ggtitle(title)
+}
+
+
+```
+
+```{#r}
+scatterplot_dds(Rwanda_results, "Rwanda")
+scatterplot_dds(Ghana_results, "Ghana")
+scatterplot_dds(Nigeria_results, "Nigeria")
+scatterplot_dds(Malaysia_results, "Malaysia")
+```
+
+```{#r}
+find_slopeintercept <- function(res_list, title){
+  
+  res_uc <- res_list[[1]]
+  res_rc <- res_list[[2]]
+  sig_shared <- res_list[[3]]
+  sig_uc_only <- res_list[[4]]
+  sig_rc_only <- res_list[[5]]
+  
+# Prepare data for L2FC scatter plot
+  res_uc_lab <- res_uc %>%
+    dplyr::select(ensembl_gene_id, log2FoldChange, padj, pvalue) %>%
+    mutate(neg_log10_pvalue = -log10(pvalue),
+           neg_log10_padj = -log10(padj)) %>%
+    rename_with(~paste0(., "_uc"), -1)
+  
+  res_rc_lab <- res_rc %>%
+    dplyr::select(ensembl_gene_id, log2FoldChange, padj, pvalue) %>%
+    mutate(neg_log10_pvalue = -log10(pvalue),
+           neg_log10_padj = -log10(padj)) %>%
+    rename_with(~paste0(., "_rc"), -1)
+  
+  # Merge results
+  res_uc_rc <- merge(
+    res_uc_lab[, c("ensembl_gene_id", "log2FoldChange_uc", "padj_uc", "neg_log10_padj_uc", "pvalue_uc", "neg_log10_pvalue_uc")], 
+    res_rc_lab[, c("ensembl_gene_id", "log2FoldChange_rc", "padj_rc", "neg_log10_padj_rc", "pvalue_rc", "neg_log10_pvalue_rc")], 
+    by = "ensembl_gene_id"
+  ) %>%
+    mutate(color_group = case_when(
+      ensembl_gene_id %in% sig_shared ~ "Shared",
+      ensembl_gene_id %in% sig_rc_only$ensembl_gene_id ~ "Rural only",
+      ensembl_gene_id %in% sig_uc_only$ensembl_gene_id ~ "Urban only",
+      TRUE ~ "Non-sig"
+    )) %>%
+    mutate(sig = ifelse(color_group != "Non-sig", "Sig", "Non-sig")) %>%
+    mutate(abs_l2fc_uc = abs(log2FoldChange_uc),
+           abs_l2fc_rc = abs(log2FoldChange_rc)) %>%
+    mutate(ratio_l2fc = abs_l2fc_uc/ abs_l2fc_rc) %>%
+    arrange(color_group)
+  
+# Fit the linear model
+lm_model_rcuc <- lm(abs_l2fc_rc ~ abs_l2fc_uc, data = res_uc_rc)
+lm_model_ucrc <- lm(abs_l2fc_uc ~ abs_l2fc_rc, data = res_uc_rc)
+
+# Get the coefficients
+coefficients_rcuc <- coef(lm_model_rcuc)
+coefficients_ucrc <- coef(lm_model_ucrc)
+
+# Extract the slope and intercept
+slope_rcuc <- coefficients_rcuc[2]  # The second coefficient is the slope (m)
+slope_ucrc <- coefficients_ucrc[2]
+intercept_rcuc <- coefficients_rcuc[1]  # The first coefficient is the intercept (b)
+intercept_ucrc <- coefficients_ucrc[1]
+
+nrow(dplyr::filter(res_uc_rc, ratio_l2fc > 1)) / nrow(res_uc_rc)
+nrow(dplyr::filter(res_uc_rc, ratio_l2fc < 1)) /nrow(res_uc_rc)
+
+nrow(dplyr::filter(res_uc_rc, ratio_l2fc > 10)) / nrow(res_uc_rc)
+nrow(dplyr::filter(res_uc_rc, ratio_l2fc < 0.1)) /nrow(res_uc_rc)
+
+# Print the equation of the line
+cat(title, 
+    "\n", 
+    "rc ~ uc: y =", slope_rcuc, "* x +", intercept_rcuc, 
+    "\n", 
+    "uc ~ rc: y =", slope_ucrc, "* x +", intercept_ucrc, 
+    "\n",
+    "% l2fc greater in uc than rc", nrow(dplyr::filter(res_uc_rc, ratio_l2fc > 1)) / nrow(res_uc_rc),
+    "\n",
+    "% l2fc greater in rc than uc", nrow(dplyr::filter(res_uc_rc, ratio_l2fc < 1)) /nrow(res_uc_rc),
+    "\n",
+    "\n"
+    )
+
+}
+
+find_slopeintercept(Rwanda_results, "Rwanda")
+find_slopeintercept(Ghana_results, "Ghana")
+find_slopeintercept(Nigeria_results, "Nigeria")
+find_slopeintercept(Malaysia_results, "Malaysia")
+```
+
+
+
+
+
+
+
 ```{r}
 most_sig <- rbind(res_uc, res_rc) %>%
-  arrange(padj) %>%
+  arrange(padj) %>% #padj
   slice_head(n = 100) %>% #100
   distinct(ensembl_gene_id) %>%
   pull()
@@ -274,7 +2121,7 @@ res_uc_rc_lab2 <-
   dplyr::filter(ensembl_gene_id %in% most_sig)
 
 sorted_df <- res_uc_rc_lab2 %>%
-  filter(contrast == "uc") %>%
+  dplyr::filter(contrast == "uc") %>%
   arrange(log2FoldChange)
   
 
@@ -296,8 +2143,23 @@ ggplot(res_uc_rc_lab2, aes(x=log2FoldChange, y=ensembl_gene_id, fill=contrast, c
         axis.title.y = element_blank(),
         axis.text.y = element_blank()) +
   geom_vline(xintercept=0, color="grey")
-ggsave("results/figs/RNAseq-urbanism/gene_l2fC_dotplot.png", width=3, height=7)
+#ggsave("results/figs/RNAseq-urbanism/gene_l2fC_dotplot.png", width=3, height=9)
 #ggsave("results/figs/RNAseq-urbanism/gene_l2fC_dotplot.png", width=3, height=4)
+#ggsave("results/figs/RNAseq-urbanism/gene_l2fC_dotplot_short.png", width=3, height=4)
+```
+Test using wilcox
+```{r}
+res_uc_rc_lab2_uc <- res_uc_rc_lab2 %>% dplyr::filter(contrast=="uc") %>%
+  dplyr::arrange(ensembl_gene_id)
+res_uc_rc_lab2_rc <- res_uc_rc_lab2 %>% dplyr::filter(contrast=="rc") %>%
+  dplyr::arrange(ensembl_gene_id)
+
+# Perform Wilcoxon Signed-Rank Test for difference in LFC between models
+wilcox_test_results <- wilcox.test(res_uc_rc_lab2_uc$log2FoldChange, res_uc_rc_lab2_rc$log2FoldChange, paired = TRUE)
+
+# Output results
+print(wilcox_test_results)
+
 ```
 
 
@@ -419,6 +2281,75 @@ qqunif.plot<-function(pvalues,
 	)
 }
 ```
+```{#r}
+select_v_all <- res_shannoninteraction$pvalue
+select_v_all_qq <- qqunif.plot(select_v_all, auto.key=list(corner=c(.95,.05)))
+select_v_all_qq
+```
+```{r}
+select_v_all <- list("urban_group1" = na.omit(res_urban_group1$pvalue),
+                     "urban_group2" = na.omit(res_urban_group2$pvalue),
+                     "rural_group1" = na.omit(res_rural_group1$pvalue),
+                     "rural_group2" = na.omit(res_rural_group2$pvalue))#,
+                    # "random" = na.omit(res_random$pvalue))
+select_v_all_qq <- qqunif.plot(select_v_all, auto.key=list(corner=c(.95,.05)), col=c(
+  "darkorchid4", "plum", "darkgreen","palegreen")) #,"black"
+select_v_all_qq
+```
+```{r}
+sig_urban_group1 <- dplyr::filter(res_urban_group1, padj < 0.1) 
+sig_urban_group2 <- dplyr::filter(res_urban_group2, padj < 0.1)
+sig_rural_group1 <- dplyr::filter(res_rural_group1, padj < 0.1)
+sig_rural_group2 <- dplyr::filter(res_rural_group2, padj < 0.1)
+
+nrow(sig_urban_group1) #low alpha div
+nrow(sig_urban_group2) #high alpha div
+nrow(sig_rural_group1) #low alpha div
+nrow(sig_rural_group2) #high alpha div
+
+
+sig_all <- bind_rows(
+  res_urban_group1 %>% filter(padj < 0.1) %>% mutate(pop="Industrialized", group = "Low Diversity"),
+  res_urban_group2 %>% filter(padj < 0.1) %>% mutate(pop="Industrialized", group = "High Diversity"),
+  res_rural_group1 %>% filter(padj < 0.1) %>% mutate(pop="Non-Industrialized", group = "Low Diversity"),
+  res_rural_group2 %>% filter(padj < 0.1) %>% mutate(pop="Non-Industrialized", group = "High Diversity")
+)
+
+sig_all$group <- factor(sig_all$group, levels = c("Low Diversity", "High Diversity"))
+levels(sig_all$group) <- c("Low\nDiversity", "High\nDiversity")
+
+
+degs_plot <- ggplot(sig_all, aes(x=group, fill=pop)) +
+  geom_bar(stat="count") +
+  scale_fill_manual(values=c("#7B2BC1", "#6FBD8B")) +
+  facet_wrap(~pop) +
+   theme_minimal() +
+   ylab("Number of DEGs\nTreatment v. Control") 
+
+effect_plot <- ggplot(sig_all, aes(x = group, y = abs(log2FoldChange), fill=pop)) +
+  geom_boxplot() +
+  scale_fill_manual(values=c("#7B2BC1", "#6FBD8B")) +
+  facet_wrap(~pop) +
+  theme_minimal() +
+  ylab("absolute log2 Fold Change\nSignificant Genes Only") 
+
+library(ggpubr)
+ggarrange(degs_plot, effect_plot, ncol=1)
+
+#ggsave("results/figs/RNAseq-urbanism/alphadiv_comparison.png", width=4.75, height=6)
+
+```
+
+```{#r}
+select_v_all <- list("PC1w" = na.omit(res_PC1w$pvalue), 
+                     "PC1w_shannon" = na.omit(res_PC1w_shannon$pvalue))
+select_v_all_qq <- qqunif.plot(select_v_all, auto.key=list(corner=c(.95,.05)))
+select_v_all_qq
+```
+
+
+
+
 
 ```{r}
 select_v_all <- list("urban" = na.omit(res_uc$padj), "rural" = na.omit(res_rc$padj))
@@ -432,21 +2363,115 @@ How to derive residuals: https://support.bioconductor.org/p/60567/
 ```{r}
 # Extract the residuals (batch and total.reads corrected counts)
 fitted.common.scale = t(t(assays(dds)[["mu"]])/sizeFactors(dds))
-residuals <- counts(dds, normalized=T) - fitted.common.scale
+residuals <- counts(dds, normalized=T) #- fitted.common.scale
 
 # function to filter by significant genes
-filter_residuals <- function(residuals, sig_results) {
-  filtered_residuals <- residuals[sig_results$ensembl_gene_id, , drop = FALSE]
+filter_residuals <- function(residuals, list, results) {
+  results_filt <- dplyr::filter(results, ensembl_gene_id %in% list)
+  filtered_residuals <- residuals[results_filt$ensembl_gene_id, , drop = FALSE]
   return(filtered_residuals)
 }
 
+# Pick genes of interest
+innate_immune_genes <- c(
+  # review: https://www.frontiersin.org/journals/immunology/articles/10.3389/fimmu.2020.00965/full
+  # also: https://www.nature.com/articles/s41423-021-00650-7
+  
+  # cathelicidins (humans only have 1)
+  "ENSG00000164047", #CAMP
+  
+  # MEK-ERK signaling regulates cathelicidin synthesis 
+  #source https://www.gsea-msigdb.org/gsea/msigdb/human/geneset/BIOCARTA_ERK_PATHWAY.html
+  "ENSG00000115904", #SOS1 
+  "ENSG00000087460", #GNAS
+  "ENSG00000140443", #IGF1R
+  "ENSG00000167751", #KLK2
+  "ENSG00000117676", #RPS6KA1
+  "ENSG00000102882", #MAPK3
+  "ENSG00000126767", #ELK1
+  "ENSG00000160691", #SHC1
+  "ENSG00000174775", #HRAS
+  "ENSG00000079277", #MKNK1
+  "ENSG00000153233", #PTPRR
+  "ENSG00000177885", #GRB2
+  "ENSG00000150093", #ITGB1
+  "ENSG00000136997", #MYC
+  "ENSG00000134259", #NGF
+  "ENSG00000064300", #NGFR
+  "ENSG00000113575", #PPP2CA
+  "ENSG00000169032", #MAP2K1
+  "ENSG00000132155", #RAF1
+  "ENSG00000169397", #RNASE3
+  "ENSG00000168610", #STAT3
+  "ENSG00000136908", #DPM2
+  "ENSG00000146648", #EGFR
+  "ENSG00000134853", #PDGFRA
+  
+  # tight junctions
+  "ENSG00000130545", #CRB3
+  "ENSG00000072415", #PALS1
+  "ENSG00000132849", #PATJ ###SIGNIFICANT
+  
+  # mucins
+  "ENSG00000185499", #MUC1
+  "ENSG00000198788", #MUC2
+  
+  # inflammatory cytokines and receptors
+  "ENSG00000232810", #TNF ####SIGNIFICANT
+  "ENSG00000163739", #CXCL1 ###SIGNIFICANT
+  "ENSG00000169429", #CXCL8
+  "ENSG00000125538", #IL1B
+  "ENSG00000136869", #TLR4 #regulates chemokine expression
+  "ENSG00000171049", #FPR2 #neutrophil recruitment
+  "ENSG00000136244", #IL6
+  "ENSG00000108691", #CCL2
+  "ENSG00000115008", #IL1A
+  "ENSG00000125538", #IL1B
+  "ENSG00000232810", #TNF
+  "ENSG00000172349", #IL16
+  "ENSG00000112486", #CCR6
+  "ENSG00000127318", #IL22
+  
+  # beta defensins
+  # https://www.nature.com/articles/s41598-024-66568-y
+  "ENSG00000164825", #DEFB1 #hbd-1
+  "ENSG00000171711", #DEFB4A #hbd-2 #not in dataset?
+  "ENSG00000176797", #DEFB103A #hbd-3 #not in dataset?
+  
+  # anti inflammatory
+  "ENSG00000136634", #IL10 #not in dataset?
+  "ENSG00000105329", #TGFB1
+  
+  # The Regenerating islet-derived protein III (RegIII) proteins
+  # bind bacterial carbohydrate motifs to mediate pore formation in bacterial membranes
+  "ENSG00000115386", #REG1A #not in dataset?
+  "ENSG00000172023", #REG1B #not in dataset?
+  "ENSG00000172016", #REG3A #not in dataset?
+  "ENSG00000143954", #REG3G #not in dataset?
+  "ENSG00000134193", #REG4 #not in dataset?
+  
+  # resistin-like molecules
+  "ENSG00000163515", #RETNLB #not in dataset?
+  "ENSG00000104918", #RETN #not in dataset?
+  
+  #interferons
+  "ENSG00000197919", #IFN1a
+  
+  # top gene
+  "ENSG00000116285", # strongest expression
+  "ENSG00000122884", #greater in rc
+  "ENSG00000163734"
+  
+)
+
+
 # Use lapply to filter the "residuals" sub-element and retain "sig_results"
-residuals_filt_uc <- filter_residuals(residuals, sig_uc) %>% 
+residuals_filt_uc <- filter_residuals(residuals, innate_immune_genes, res_uc) %>% 
     as.data.frame() %>% 
     rownames_to_column("ensembl_gene_id") %>%
   mutate(model="urban_v_ctrl")
 
-residuals_filt_rc <- filter_residuals(residuals, sig_rc) %>% 
+residuals_filt_rc <- filter_residuals(residuals, innate_immune_genes, res_rc) %>% 
     as.data.frame() %>% 
     rownames_to_column("ensembl_gene_id") %>%
   mutate(model="rural_v_ctrl")
@@ -458,94 +2483,68 @@ residuals_melt <- rbind(residuals_filt_rc, residuals_filt_uc) %>%
     values_to = "residual_gene_count"
   ) %>%
   left_join(meta[,c("SampleID", "urbanism")], by="SampleID") %>%
-  filter(!(model=="urban_v_ctrl" & urbanism=="rural")) %>%
-  filter(!(model=="rural_v_ctrl" & urbanism=="urban")) 
+  dplyr::filter(!(model=="urban_v_ctrl" & urbanism=="rural")) %>%
+  dplyr::filter(!(model=="rural_v_ctrl" & urbanism=="urban")) 
+```
+```{r}
+innate_sig_uc <- dplyr::filter(sig_uc, ensembl_gene_id %in% innate_immune_genes)
+innate_sig_rc <- dplyr::filter(sig_rc, ensembl_gene_id %in% innate_immune_genes)
 ```
 
-Functional analysis
-First annotate data with gene labels compatible with enrichment analyses. I like to have the uniprot gene symbol (hgnc_symbol) and a description just for my own readability.
 ```{r}
-library(ensembldb)
-library(biomaRt)
-ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl") #, host="jul2023.archive.ensembl.org"
+ggplot(residuals_melt %>% dplyr::filter(ensembl_gene_id %in% c(
+  "ENSG00000163734" #CXCL3
+  )) %>%
+    mutate(symbol=case_when(ensembl_gene_id == "ENSG00000163734" ~ "CXCL3")), 
+  aes(x=urbanism, y=residual_gene_count, color=urbanism)) +
+  geom_boxplot() +
+  geom_point(shape=16, width = 0.1) + #alpha=0.4, 
+  scale_color_manual(values=c("grey20", "#6FBD8B", "#7B2BC1")) +
+  facet_wrap(~symbol, scales="free") +
+  theme_linedraw()
+```
 
-# Define annotations
-att_interest <- c("ensembl_gene_id", "description", "hgnc_symbol") #"ensembl_transcript_id", 
 
-annotate_ensembl <- function(resdf){biomaRt::getBM(
-  attributes = att_interest, 
-  filters = "ensembl_gene_id",
-  values = resdf$ensembl_gene_id, 
-  mart = ensembl) %>%
-  left_join(resdf, by="ensembl_gene_id")
+FUNCTIONAL ANALYSIS: ENRICHMENT
+
+First, start with non-filtered results and separate into up and down
+```{#r}
+res_Axis1_genus_scaled_up <- dplyr::filter(res_Axis1_genus_scaled, log2FoldChange > 0)
+res_Axis1_genus_scaled_down <- dplyr::filter(res_Axis1_genus_scaled, log2FoldChange < 0)
+
+
+res_uc_up <- dplyr::filter(res_uc, log2FoldChange > 0)
+res_uc_down <- dplyr::filter(res_uc, log2FoldChange < 0)
+res_rc_up <- dplyr::filter(res_rc, log2FoldChange > 0)
+res_rc_down <- dplyr::filter(res_rc, log2FoldChange < 0)
+```
+Next, create a gene list vector where names are genes and values are l2fc values
+```{#r}
+# Function to create a gene list vector with positive l2fc values, arranged greatest to least
+create_gene_list <- function(df) {
+  df <- df %>%
+    #dplyr::mutate(log2FoldChange = abs(log2FoldChange)) %>%
+    dplyr::mutate(neglog10pvalue = -log10(pvalue)) %>%
+    dplyr::mutate(rank = abs(log2FoldChange) * neglog10pvalue) %>%
+    rownames_to_column("ensembl_gene_id") %>%
+    dplyr::mutate(ensembl_gene = ensembl_gene_id) %>%
+    dplyr::arrange(desc(rank))
+  setNames(df$rank, df$ensembl_gene)
+    #dplyr::arrange(desc(log2FoldChange))
+ # setNames(df$log2FoldChange, df$ensembl_gene)
 }
+
+# Apply the function to create the gene lists
+gene_list_Axis1_up <- create_gene_list(res_Axis1_genus_scaled_up)
+gene_list_Axis1_down <- create_gene_list(res_Axis1_genus_scaled_down)
+
+gene_list_uc_up <- create_gene_list(res_uc_up)
+gene_list_uc_down <- create_gene_list(res_uc_down)
+gene_list_rc_up <- create_gene_list(res_rc_up)
+gene_list_rc_down <- create_gene_list(res_rc_down)
 ```
-
-Next define universe and gene set of interest. For my universe I used every gene I originally tested, and for sig I used the "top" significant genes (greatest l2FC + smallest p adjusted). Choosing the number of genes to test is a trade-off with multiple testing burden, but at least 100 genes will give you decent power. In this case my universe and sig are both dataframes, but character vectors are fine too.
-Here I am experimenting with 3 different gene sets: "shared" (or "sig" here), "uc" and "rc". 
-```{r}
-# start with the genes that have the highest l2FCs and lowest padj values that are shared among the urban and rural
-
-# dataframe of about 14,000 genes
-uni <- unique(res_rc$ensembl_gene_id) %>%
-  as.data.frame()
-colnames(uni) <- "ensembl_gene_id"
-uni <- annotate_ensembl(uni)
-
-# dataframe of sig genes 
-sig_top <- rbind(sig_uc, sig_rc) %>%
-  dplyr::filter(ensembl_gene_id %in% sig_shared) %>%
-  mutate(abs_l2fc = abs(log2FoldChange)) %>%
-  arrange(desc(abs_l2fc), padj) %>%
-  annotate_ensembl() #%>%
-  #slice(1:250)
-#length(unique(sig_top$hgnc_symbol))
-
-# another dataframe of sig genes 
-uc_top <- sig_uc %>%
-  #dplyr::filter(!ensembl_gene_id %in% sig_shared) %>%
-  mutate(abs_l2fc = abs(log2FoldChange)) %>%
-  arrange(desc(abs_l2fc), padj) %>%
-  annotate_ensembl() %>%
-  dplyr::slice(1:400)
-#length(unique(uc_top$hgnc_symbol))
-
-# another dataframe of sig genes 
-rc_top <- sig_rc %>%
-  #dplyr::filter(!ensembl_gene_id %in% sig_shared) %>%
-  mutate(abs_l2fc = abs(log2FoldChange)) %>%
-  arrange(desc(abs_l2fc), padj) %>%
-  annotate_ensembl() %>%
-  dplyr::slice(1:400)
-#length(unique(rc_top$hgnc_symbol))
-```
-```{r}
-sig_uc_up_anno <- annotate_ensembl(sig_uc_up) %>%
-  mutate(abs_l2fc = abs(log2FoldChange)) #%>%
-  #dplyr::filter(abs_l2fc > 0.1)
-sig_uc_down_anno <- annotate_ensembl(sig_uc_down) %>%
-  mutate(abs_l2fc = abs(log2FoldChange)) #%>%
-  #dplyr::filter(abs_l2fc > 0.1)
-sig_rc_up_anno <- annotate_ensembl(sig_rc_up) %>%
-  mutate(abs_l2fc = abs(log2FoldChange)) #%>%
-  #dplyr::filter(abs_l2fc > 0.1)
-sig_rc_down_anno <- annotate_ensembl(sig_rc_down) %>%
-  mutate(abs_l2fc = abs(log2FoldChange)) #%>%
-  #dplyr::filter(abs_l2fc > 0.1)
-
-nrow(sig_uc_up_anno)
-nrow(sig_uc_down_anno)
-nrow(sig_rc_up_anno)
-nrow(sig_rc_down_anno)
-```
-
-https://cran.r-project.org/web/packages/msigdbr/vignettes/msigdbr-intro.html
-https://www.gsea-msigdb.org/gsea/msigdb/human/genesets.jsp?collection=CP
-About these databases: https://www.gsea-msigdb.org/gsea/msigdb/human/collections.jsp
-
-Next choose the databases you want to test. KEGG and Reactome are the most relevant for my research.
-Per Sambhawa's 2022 pub, I am only investigating a pathway if it contains at least 25 genes but less than 300 genes. 
-```{r}
+Define msigdb gene sets
+```{#r}
 library(msigdbr)
 
 #msigdbr_collections()
@@ -581,13 +2580,308 @@ msigdb_all <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>%
 # Summarize metrics from all pathways from all databases
 msigdb_cp_summary <- msigdb_cp %>%
   group_by(gs_name) %>%
-  summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  dplyr::summarize(GeneCount = n_distinct(gene_symbol)) %>%
   # sambhawas filtering cutoffs
   dplyr::filter(GeneCount > 25, GeneCount < 300)
 
 msigdb_all_summary <- msigdb_all %>%
   group_by(gs_name) %>%
-  summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  dplyr::summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  # sambhawas filtering cutoffs
+  dplyr::filter(GeneCount > 25, GeneCount < 300)
+
+# Narrow down pathways that meet our thresholds  
+msigdb_cp_filt <- msigdb_cp %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpPID_filt <- msigdb_cpPID %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpKEGG_filt <- msigdb_cpKEGG %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpREACTOME_filt <- msigdb_cpREACTOME %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+msigdb_cpBIOCARTA_filt <- msigdb_cpBIOCARTA %>%
+  dplyr::filter(gs_name %in% msigdb_cp_summary$gs_name)
+
+msigdb_all_filt <- msigdb_all %>%
+  dplyr::filter(gs_name %in% msigdb_all_summary$gs_name)
+
+library(clusterProfiler)
+
+# df of distinct gene symbols
+# TERM2GENE is a data frame with first column of term ID and second column of corresponding mapped gene
+#msigdb_cp_t2g = msigdb_cp_filt %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+msigdb_all_t2g = msigdb_all_filt %>% dplyr::distinct(gs_name, ensembl_gene) %>% as.data.frame()
+
+```
+Perform enrichment 
+```{#r}
+Axis1_up_gsea <- GSEA(gene_list_Axis1_up, TERM2GENE = msigdb_all_t2g, pvalueCutoff = 0.1, scoreType = "pos")
+Axis1_down_gsea <- GSEA(gene_list_Axis1_down, TERM2GENE = msigdb_all_t2g, pvalueCutoff = 0.1, scoreType = "pos")
+
+uc_up_gsea <- GSEA(gene_list_uc_up, TERM2GENE = msigdb_all_t2g, pvalueCutoff = 0.1)
+uc_down_gsea <- GSEA(gene_list_uc_down, TERM2GENE = msigdb_all_t2g, pvalueCutoff = 0.1)
+rc_up_gsea <- GSEA(gene_list_rc_up, TERM2GENE = msigdb_all_t2g, pvalueCutoff = 0.1) 
+rc_down_gsea <- GSEA(gene_list_rc_down, TERM2GENE =msigdb_all_t2g, pvalueCutoff = 0.1) 
+```
+
+
+
+
+
+FUNCTIONAL ANALYSIS: OVER-REPRESENTATION
+First annotate data with gene labels compatible with enrichment analyses. I like to have the uniprot gene symbol (hgnc_symbol) and a description just for my own readability.
+```{r}
+library(ensembldb)
+library(biomaRt)
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", host="jul2023.archive.ensembl.org") #, host="jul2023.archive.ensembl.org"
+
+# Define annotations
+att_interest <- c("ensembl_gene_id", "description", "hgnc_symbol") #"ensembl_transcript_id", 
+
+annotate_ensembl <- function(resdf){biomaRt::getBM(
+  attributes = att_interest, 
+  filters = "ensembl_gene_id",
+  values = resdf$ensembl_gene_id, 
+  mart = ensembl) %>%
+  left_join(resdf, by="ensembl_gene_id")
+}
+```
+
+Next define universe and gene set of interest. For my universe I used every gene I originally tested, and for sig I used the "top" significant genes (greatest l2FC + smallest p adjusted). Choosing the number of genes to test is a trade-off with multiple testing burden, but at least 100 genes will give you decent power. In this case my universe and sig are both dataframes, but character vectors are fine too.
+Here I am experimenting with 3 different gene sets: "shared" (or "sig" here), "uc" and "rc". 
+```{r}
+# start with the genes that have the highest l2FCs and lowest padj values that are shared among the urban and rural
+
+# dataframe of about 14,000 genes
+uni <- unique(res_rc$ensembl_gene_id) %>%
+  as.data.frame()
+colnames(uni) <- "ensembl_gene_id"
+uni <- annotate_ensembl(uni)
+
+uni_rural <- unique(res_rc$ensembl_gene_id) %>%
+  as.data.frame()
+colnames(uni_rural) <- "ensembl_gene_id"
+uni_rural <- annotate_ensembl(uni_rural)
+
+uni_urban <- unique(res_uc$ensembl_gene_id) %>%
+  as.data.frame()
+colnames(uni_urban) <- "ensembl_gene_id"
+uni_urban <- annotate_ensembl(uni_urban)
+
+# dataframe of sig genes 
+sig_top <- rbind(sig_uc, sig_rc) %>%
+  dplyr::filter(ensembl_gene_id %in% sig_shared) %>%
+  mutate(abs_l2fc = abs(log2FoldChange)) %>%
+  arrange(desc(abs_l2fc), padj) %>%
+  annotate_ensembl() #%>%
+  #slice(1:250)
+#length(unique(sig_top$hgnc_symbol))
+
+# another dataframe of sig genes 
+uc_top <- sig_uc %>%
+  #dplyr::filter(!ensembl_gene_id %in% sig_shared) %>%
+  mutate(abs_l2fc = abs(log2FoldChange)) %>%
+  arrange(desc(abs_l2fc), padj) %>%
+  annotate_ensembl() %>%
+  dplyr::slice(1:400)
+#length(unique(uc_top$hgnc_symbol))
+
+# another dataframe of sig genes 
+rc_top <- sig_rc %>%
+  #dplyr::filter(!ensembl_gene_id %in% sig_shared) %>%
+  mutate(abs_l2fc = abs(log2FoldChange)) %>%
+  arrange(desc(abs_l2fc), padj) %>%
+  annotate_ensembl() %>%
+  dplyr::slice(1:400)
+#length(unique(rc_top$hgnc_symbol))
+```
+```{r}
+sig_uc_up_anno <- annotate_ensembl(sig_uc_up) %>%
+  mutate(abs_l2fc = abs(log2FoldChange)) #%>%
+  #dplyr::slice(1:200) #%>%
+  #dplyr::filter(abs_l2fc > 0.1)
+sig_uc_down_anno <- annotate_ensembl(sig_uc_down) %>%
+  mutate(abs_l2fc = abs(log2FoldChange)) #%>%
+  #dplyr::slice(1:200) #%>%
+  #dplyr::filter(abs_l2fc > 0.1)
+sig_rc_up_anno <- annotate_ensembl(sig_rc_up) %>%
+  mutate(abs_l2fc = abs(log2FoldChange)) #%>%
+  #dplyr::slice(1:200) #%>%
+  #dplyr::filter(abs_l2fc > 0.1)
+sig_rc_down_anno <- annotate_ensembl(sig_rc_down) %>%
+  mutate(abs_l2fc = abs(log2FoldChange)) #%>%
+  #dplyr::slice(1:200) #%>%
+  #dplyr::filter(abs_l2fc > 0.1)
+
+nrow(sig_uc_up_anno)
+nrow(sig_uc_down_anno)
+nrow(sig_rc_up_anno)
+nrow(sig_rc_down_anno)
+
+all_sig_anno <- rbind(sig_uc_up_anno, sig_uc_down_anno, sig_rc_up_anno, sig_rc_down_anno) %>%
+  arrange(log2FoldChange)
+write.table(all_sig_anno, file = pipe("pbcopy"), sep = "\t", row.names = FALSE, col.names = TRUE)
+
+```
+
+https://cran.r-project.org/web/packages/msigdbr/vignettes/msigdbr-intro.html
+https://www.gsea-msigdb.org/gsea/msigdb/human/genesets.jsp?collection=CP
+About these databases: https://www.gsea-msigdb.org/gsea/msigdb/human/collections.jsp
+
+Start by looking at GO
+```{#r}
+library(msigdbr)
+
+GO_EPITHELIAL = msigdbr(species = "human", category = "C5") 
+
+EPITHELIAL_t2g = GO_EPITHELIAL %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+```
+
+Since we are using enterocytes, lets first consider some pathways that are specific to epithelial processes. 
+```{#r}
+library(msigdbr)
+
+HALLMARK_EPITHELIAL = msigdbr(species = "human", category = "H") %>%
+  dplyr::filter(gs_name %in% c("HALLMARK_APICAL_SURFACE"))
+GO_EPITHELIAL = msigdbr(species = "human", category = "C5") %>%
+  dplyr::filter(gs_name %in% c("GOBP_POLARIZED_EPITHELIAL_CELL_DIFFERENTIATION", "GOBP_POLARIZED_EPITHELIAL_CELL_PROLIFERATION", "GOBP_APICAL_JUNCTION_ASSEMBLY", "GOCC_APICAL_JUNCTION_COMPLEX"))
+KEGG_EPITHELIAL = msigdbr(species = "human", category = "C2", subcategory = "CP:KEGG") %>%
+  dplyr::filter(gs_name %in% c("KEGG_TIGHT_JUNCTION", "KEGG_WNT_SIGNALING_PATHWAY"))
+CURATED_EPITHELIAL = msigdbr(species = "human", category = "C2", subcategory = "CP") %>%
+  dplyr::filter(gs_name %in% c("WNT_SIGNALING"))
+
+EPITHELIAL_all <- rbind(HALLMARK_EPITHELIAL, GO_EPITHELIAL, KEGG_EPITHELIAL, CURATED_EPITHELIAL) 
+
+EPITHELIAL_t2g = EPITHELIAL_all %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+```
+Separate up from down
+```{#r}
+library(clusterProfiler)
+
+EPITHELIAL_uc_enrich_up <- enricher(gene = unique(sig_uc_up_anno$hgnc_symbol), TERM2GENE = EPITHELIAL_t2g, universe = uni_urban$hgnc_symbol)
+EPITHELIAL_uc_enrich_up_res <- EPITHELIAL_uc_enrich_up@result %>% mutate(model="uc") %>% mutate(dir="up")
+EPITHELIAL_uc_enrich_up_sig <- EPITHELIAL_uc_enrich_up_res %>% dplyr::filter(Count > 1, p.adjust < 0.1)  
+
+EPITHELIAL_uc_enrich_down <- enricher(gene = unique(sig_uc_down_anno$hgnc_symbol), TERM2GENE = EPITHELIAL_t2g, universe = uni_urban$hgnc_symbol)
+EPITHELIAL_uc_enrich_down_res <- EPITHELIAL_uc_enrich_down@result %>% mutate(model="uc") %>% mutate(dir="down")
+EPITHELIAL_uc_enrich_down_sig <- EPITHELIAL_uc_enrich_down_res %>% dplyr::filter(Count > 1, p.adjust < 0.1)  
+
+EPITHELIAL_rc_enrich_up <- enricher(gene = unique(sig_rc_up_anno$hgnc_symbol), TERM2GENE = EPITHELIAL_t2g, universe = uni_rural$hgnc_symbol)
+EPITHELIAL_rc_enrich_up_res <- EPITHELIAL_rc_enrich_up@result %>% mutate(model="rc") %>% mutate(dir="up")
+EPITHELIAL_rc_enrich_up_sig <- EPITHELIAL_rc_enrich_up_res %>% dplyr::filter(Count > 1, p.adjust < 0.1)  
+
+EPITHELIAL_rc_enrich_down <- enricher(gene = unique(sig_rc_down_anno$hgnc_symbol), TERM2GENE = EPITHELIAL_t2g, universe = uni_rural$hgnc_symbol)
+EPITHELIAL_rc_enrich_down_res <- EPITHELIAL_rc_enrich_down@result %>% mutate(model="rc") %>% mutate(dir="down")
+EPITHELIAL_rc_enrich_down_sig <- EPITHELIAL_rc_enrich_down_res %>% dplyr::filter(Count > 1, p.adjust < 0.1) 
+```
+
+```{#r}
+library(stringr)
+
+sum_groups <- function(df){
+  
+df_long <- df %>%
+  separate_rows(geneID, sep = "/") %>%
+  mutate(row_id = row_number())
+
+# Group by row_id to get the list of genes in each row
+gene_list <- df_long %>%
+  group_by(row_id) %>%
+  summarise(gene_set = list(geneID)) %>%
+  pull(gene_set)
+
+# Define a function to get combinations of a certain size
+get_combinations <- function(gene_list, size) {
+  combos <- lapply(gene_list, function(x) {
+    if (length(x) >= size) {
+      return(combn(x, size, simplify = FALSE))
+    } else {
+      return(NULL)
+    }
+  })
+  combos <- unlist(combos, recursive = FALSE)
+  return(combos)
+}
+
+# Get combinations of size 4 and 5
+combos_4 <- get_combinations(gene_list, 4)
+combos_5 <- get_combinations(gene_list, 5)
+
+# Convert combinations to a data frame
+combos_df <- data.frame(
+  combo = c(sapply(combos_4, paste, collapse = "/"), sapply(combos_5, paste, collapse = "/")),
+  size = c(rep(4, length(combos_4)), rep(5, length(combos_5)))
+)
+
+# Count occurrences of each combination
+combo_counts <- combos_df %>%
+  group_by(combo) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+}
+
+# Separate the geneIDs into individual rows
+EPITHELIAL_rc_enrich_up_sum <- EPITHELIAL_rc_enrich_up_sig %>%
+  separate_rows(geneID, sep = "/") %>%
+  count(geneID, name = "count")
+
+EPITHELIAL_rc_enrich_up_combo <- sum_groups(EPITHELIAL_rc_enrich_up_sig)
+
+EPITHELIAL_uc_enrich_down_sum <- EPITHELIAL_uc_enrich_down_sig %>%
+  separate_rows(geneID, sep = "/") %>%
+  count(geneID, name = "count")
+
+EPITHELIAL_uc_enrich_down_sig_combo <- sum_groups(EPITHELIAL_uc_enrich_down_sig)
+```
+
+
+
+
+Next choose the databases you want to test. KEGG and Reactome are the most relevant for my research.
+Per Sambhawa's 2022 pub, I am only investigating a pathway if it contains at least 25 genes but less than 300 genes. 
+```{r}
+library(msigdbr)
+
+#msigdbr_collections()
+
+# download databases of interest
+msigdb_h = msigdbr(species = "human", category = "H")
+msigdb_cpPID = msigdbr(species = "human", category = "C2", subcategory = "CP:PID")
+msigdb_cpKEGG = msigdbr(species = "human", category = "C2", subcategory = "CP:KEGG_MEDICUS")
+msigdb_cpREACTOME = msigdbr(species = "human", category = "C2", subcategory = "CP:REACTOME")
+msigdb_cpBIOCARTA = msigdbr(species = "human", category = "C2", subcategory = "CP:BIOCARTA")
+msigdb_cgp = msigdbr(species = "human", category = "C2", subcategory = "CGP") %>%
+  mutate(gs_name = paste("CGP", gs_name, sep = "_"))
+msigdb_cgn = msigdbr(species = "human", category = "C4", subcategory = "CGN") %>%
+  mutate(gs_name = paste("CGN", gs_name, sep = "_"))
+msigdb_cm = msigdbr(species = "human", category = "C4", subcategory = "CM") %>%
+  mutate(gs_name = paste("CM", gs_name, sep = "_"))
+msigdb_IMMUNESIGDB = msigdbr(species = "human", category = "C7", subcategory = "IMMUNESIGDB") %>%
+  mutate(gs_name = paste("IMMUNESIGDB", gs_name, sep = "_"))
+
+# Experimenting with pasting these all together to reduce code burden
+msigdb_cp <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>%
+  rbind(msigdb_cpPID)
+
+msigdb_all <- rbind(msigdb_cpKEGG, msigdb_cpREACTOME) %>%
+  rbind(msigdb_cpPID) %>%
+  rbind(msigdb_cpBIOCARTA) %>%
+  rbind(msigdb_h) #%>%
+  #rbind(msigdb_cgp) %>%
+  #rbind(msigdb_cgn) %>%
+  #rbind(msigdb_cm)  %>%
+  #rbind(msigdb_IMMUNESIGDB)
+  
+# Summarize metrics from all pathways from all databases
+msigdb_cp_summary <- msigdb_cp %>%
+  group_by(gs_name) %>%
+  dplyr::summarize(GeneCount = n_distinct(gene_symbol)) %>%
+  # sambhawas filtering cutoffs
+  dplyr::filter(GeneCount > 25, GeneCount < 300)
+
+msigdb_all_summary <- msigdb_all %>%
+  group_by(gs_name) %>%
+  dplyr::summarize(GeneCount = n_distinct(gene_symbol)) %>%
   # sambhawas filtering cutoffs
   dplyr::filter(GeneCount > 25, GeneCount < 300)
 
@@ -624,34 +2918,38 @@ Not distinguishing up from down
 shared_enrich <- enricher(gene = unique(sig_top$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni$hgnc_symbol)
 shared_enrich_res <- shared_enrich@result %>%
   # I am only interested in a gene set if at least 3 of my sig genes belong, and if the FDR is < 0.1
-  dplyr::filter(Count > 3, p.adjust < 0.1)
+  dplyr::filter(Count > 2, p.adjust < 0.1)
 
-uc_enrich <- enricher(gene = unique(uc_top$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni$hgnc_symbol)
+uc_enrich <- enricher(gene = unique(uc_top$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni_urban$hgnc_symbol)
 uc_enrich_res <- uc_enrich@result %>% mutate(model="uc")
-uc_enrich_sig <- uc_enrich_res %>% dplyr::filter(Count > 3, p.adjust < 0.1) 
+uc_enrich_sig <- uc_enrich_res %>% dplyr::filter(Count > 2, p.adjust < 0.1) 
 
 
-rc_enrich <- enricher(gene = unique(rc_top$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni$hgnc_symbol)
+rc_enrich <- enricher(gene = unique(rc_top$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni_rural$hgnc_symbol)
 rc_enrich_res <- rc_enrich@result  %>% mutate(model="rc")
-rc_enrich_sig <- rc_enrich_res %>% dplyr::filter(Count > 3, p.adjust < 0.1) 
+rc_enrich_sig <- rc_enrich_res %>% dplyr::filter(Count > 2, p.adjust < 0.1) 
 ```
 Separate up from down
 ```{r}
-uc_enrich_up <- enricher(gene = unique(sig_uc_up_anno$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni$hgnc_symbol)
+uc_enrich_up <- enricher(gene = unique(sig_uc_up_anno$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni_urban$hgnc_symbol)
 uc_enrich_up_res <- uc_enrich_up@result %>% mutate(model="uc") %>% mutate(dir="up")
-uc_enrich_up_sig <- uc_enrich_up_res %>% dplyr::filter(Count > 3, p.adjust < 0.1)  
+uc_enrich_up_sig <- uc_enrich_up_res %>% dplyr::filter(Count > 2, p.adjust < 0.1)  
 
-uc_enrich_down <- enricher(gene = unique(sig_uc_down_anno$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni$hgnc_symbol)
+uc_enrich_down <- enricher(gene = unique(sig_uc_down_anno$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni_urban$hgnc_symbol)
 uc_enrich_down_res <- uc_enrich_down@result %>% mutate(model="uc") %>% mutate(dir="down")
-uc_enrich_down_sig <- uc_enrich_down_res %>% dplyr::filter(Count > 3, p.adjust < 0.1)  
+uc_enrich_down_sig <- uc_enrich_down_res %>% dplyr::filter(Count > 2, p.adjust < 0.1)  
 
-rc_enrich_up <- enricher(gene = unique(sig_rc_up_anno$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni$hgnc_symbol)
+rc_enrich_up <- enricher(gene = unique(sig_rc_up_anno$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni_rural$hgnc_symbol)
 rc_enrich_up_res <- rc_enrich_up@result %>% mutate(model="rc") %>% mutate(dir="up")
-rc_enrich_up_sig <- rc_enrich_up_res %>% dplyr::filter(Count > 3, p.adjust < 0.1)  
+rc_enrich_up_sig <- rc_enrich_up_res %>% dplyr::filter(Count > 2, p.adjust < 0.1)  
 
-rc_enrich_down <- enricher(gene = unique(sig_rc_down_anno$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni$hgnc_symbol)
+rc_enrich_down <- enricher(gene = unique(sig_rc_down_anno$hgnc_symbol), TERM2GENE = msigdb_all_t2g, universe = uni_rural$hgnc_symbol)
 rc_enrich_down_res <- rc_enrich_down@result %>% mutate(model="rc") %>% mutate(dir="down")
-rc_enrich_down_sig <- rc_enrich_down_res %>% dplyr::filter(Count > 3, p.adjust < 0.1) 
+rc_enrich_down_sig <- rc_enrich_down_res %>% dplyr::filter(Count > 2, p.adjust < 0.1) 
+```
+```{r}
+all_enrich <- rbind(uc_enrich_up_sig, uc_enrich_down_sig, rc_enrich_up_sig, rc_enrich_down_sig)
+write.table(all_enrich, file = pipe("pbcopy"), sep = "\t", row.names = FALSE, col.names = TRUE)
 ```
 
 
@@ -661,6 +2959,8 @@ enriched_pathways <- #rbind(uc_enrich_res, rc_enrich_res) %>%
   rbind(uc_enrich_up_res, uc_enrich_down_res) %>%
   rbind(rc_enrich_up_res) %>%
   rbind(rc_enrich_down_res) %>%
+  # only include those with count > 2
+  dplyr::filter(Count > 2) %>%
   #dplyr::filter(ID %in% c(uc_enrich_sig$ID, rc_enrich_sig$ID)) %>%
   dplyr::filter(ID %in% c(uc_enrich_up_sig$ID, uc_enrich_down_sig$ID, rc_enrich_up_sig$ID, rc_enrich_down_sig$ID)) %>%
   mutate(db = case_when(
@@ -676,7 +2976,8 @@ enriched_pathways <- #rbind(uc_enrich_res, rc_enrich_res) %>%
     TRUE ~ "Other"  # Add a default value for other cases
   )) %>%
   mutate(ID_2 = gsub("^[^_]+_", "", ID)) %>%
-  mutate(ID_2 = gsub("_", " ", ID_2)) 
+  mutate(ID_2 = gsub("_", " ", ID_2)) %>%
+  mutate(ID_3 = str_sub(ID_2, 1, 40)) 
   #mutate(ID_2 = paste0(toupper(substring(ID_2, 1, 1)), tolower(substring(ID_2, 2)))) %>%
   
 ```
@@ -700,7 +3001,9 @@ enriched_pathways_up <- enriched_pathways %>%
     (ID %in% rc_enrich_up_sig$ID) & (!ID %in% uc_enrich_up_sig$ID) ~ "rural_up_only",
     TRUE ~ "Other"
   )) %>%
-  arrange(GeneRatio_numeric)
+  arrange(GeneRatio_numeric) %>%
+  ####THERE'S A BUG WHERE TNFA IS ONLY SHOWING RURAL NOT URBAN DESPITE IT BEING IN THE "BOTH" CATGEORY
+  dplyr::filter(!ID == "HALLMARK_TNFA_SIGNALING_VIA_NFKB")
 
 enriched_pathways_down <- enriched_pathways %>%
   dplyr::filter(dir=="down") %>%
@@ -720,7 +3023,7 @@ enriched_pathways_down <- enriched_pathways %>%
     (ID %in% rc_enrich_down_sig$ID) & (!ID %in% uc_enrich_down_sig$ID) ~ "rural_down_only",
     TRUE ~ "Other"
   )) %>%
-  arrange(GeneRatio_numeric)
+  arrange(GeneRatio_numeric) 
 
 # I DON'T KNOW IF THIS IS THE BEST WAY TO DO THIS... 
 # BUT TO REDUCE REDUNDANCY, PICK ID_2 WITH LARGEST PADJ
@@ -730,54 +3033,141 @@ enriched_pathways2_up <- enriched_pathways_up %>%
   dplyr::slice(which.max(neglog10_p.adjust)) %>%
   ungroup() 
 
-enriched_pathways_up$ID_2 <- factor(enriched_pathways_up$ID_2, levels=unique(enriched_pathways_up$ID_2))
-enriched_pathways_up$sig_in <- factor(enriched_pathways_up$sig_in, levels=c("urban_up_only", "rural_up_only", "both_up"))
+enriched_pathways_up$ID_3 <- factor(enriched_pathways_up$ID_3, levels=unique(enriched_pathways_up$ID_3))
+enriched_pathways_up$sig_in <- factor(enriched_pathways_up$sig_in, levels=c("both_up", "urban_up_only", "rural_up_only"))
 
-enriched_pathways2_up$ID_2 <- factor(enriched_pathways2_up$ID_2, levels=unique(enriched_pathways2_up$ID_2))
-enriched_pathways2_up$sig_in <- factor(enriched_pathways2_up$sig_in, levels=c("urban_up_only", "rural_up_only", "both_up"))
+enriched_pathways2_up$ID_3 <- factor(enriched_pathways2_up$ID_3, levels=unique(enriched_pathways2_up$ID_3))
+enriched_pathways2_up$sig_in <- factor(enriched_pathways2_up$sig_in, levels=c("both_up", "urban_up_only", "rural_up_only"))
 
 enriched_pathways2_down <- enriched_pathways_down %>%
   group_by(sig_in, GeneRatio_numeric) %>%
   dplyr::slice(which.max(neglog10_p.adjust)) %>%
   ungroup() 
 
-enriched_pathways_down$ID_2 <- factor(enriched_pathways_down$ID_2, levels=unique(enriched_pathways_down$ID_2))
-enriched_pathways_down$sig_in <- factor(enriched_pathways_down$sig_in, levels=c("urban_down_only", "rural_down_only", "both_down"))
+enriched_pathways_down$ID_3 <- factor(enriched_pathways_down$ID_3, levels=unique(enriched_pathways_down$ID_2))
+enriched_pathways_down$sig_in <- factor(enriched_pathways_down$sig_in, levels=c("both_down", "urban_down_only", "rural_down_only"))
 
-enriched_pathways2_down$ID_2 <- factor(enriched_pathways2_down$ID_2, levels=unique(enriched_pathways2_down$ID_2))
-enriched_pathways2_down$sig_in <- factor(enriched_pathways2_down$sig_in, levels=c("urban_down_only", "rural_down_only", "both_down"))
+enriched_pathways2_down$ID_3 <- factor(enriched_pathways2_down$ID_3, levels=unique(enriched_pathways2_down$ID_3))
+enriched_pathways2_down$sig_in <- factor(enriched_pathways2_down$sig_in, levels=c("both_down", "urban_down_only", "rural_down_only"))
 
-ggplot(enriched_pathways2_up, aes(x=GeneRatio_numeric, y=ID_2, fill=model, color=model, size=neglog10_p.adjust)) + #, size=neglog10_p.adjust # shape=sig
+ggplot(enriched_pathways2_up, aes(x=GeneRatio_numeric, y=ID_3, fill=model, color=model, size=neglog10_p.adjust)) + #, size=neglog10_p.adjust # shape=sig
   geom_point(alpha=0.75) +
-  scale_size_continuous() +
+  scale_size_continuous(limits = c(1,15), breaks = c(1, 5, 10, 15)) +
   scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
   scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
   scale_y_discrete(position = "right") +
   #scale_shape_manual(values = c(3,3,21,21)) +
   facet_grid(sig_in ~ ., scales="free", space="free") +
   theme_linedraw() +
+  #xlim(values=c(0,0.15)) +
   theme(text = element_text(size = 8),
         axis.text.y = element_text(hjust = 1))
-#ggsave("results/figs/RNAseq-urbanism/enriched_pathways_up.png", width=7.5, height=6)
+#ggsave("results/figs/RNAseq-urbanism/enriched_pathways_up.png", width=4.5, height=2)
 
-ggplot(enriched_pathways2_down, aes(x=GeneRatio_numeric, y=ID_2, fill=model, color=model, size=neglog10_p.adjust)) + #, size=neglog10_p.adjust # shape=sig
+ggplot(enriched_pathways2_down, aes(x=GeneRatio_numeric, y=ID_3, fill=model, color=model, size=neglog10_p.adjust)) + #, size=neglog10_p.adjust # shape=sig
   geom_point(alpha=0.75) +
-  scale_size_continuous() +
+  #scale_size_continuous(limits = c(1,15), breaks = c(1, 5, 10, 15, 20)) +
   scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
   scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
   scale_y_discrete(position = "right") +
   #scale_shape_manual(values = c(3,3,21,21)) +
   facet_grid(sig_in ~ ., scales="free", space="free") +
   theme_linedraw() +
+  #xlim(values=c(0,0.20)) +
   theme(text = element_text(size = 8),
         axis.text.y = element_text(hjust = 1))
-#ggsave("results/figs/RNAseq-urbanism/enriched_pathways_down.png", width=7.5, height=6)
+#ggsave("results/figs/RNAseq-urbanism/enriched_pathways_down.png", width=4.5, height=4)
 
 #ggsave("results/figs/RNAseq-urbanism/enriched_pathways.png", width=11, height=6.5)
 #ggsave("results/figs/RNAseq-urbanism/enriched_pathways.png", width=5, height=3)
 #ggsave("results/figs/RNAseq-urbanism/enriched_pathways.png", width=7.5, height=6)
 #ggsave("results/figs/RNAseq-urbanism/enriched_pathways_updown.png", width=7.5, height=12)
+
+#ggsave("results/figs/RNAseq-urbanism/enriched_pathways_updown_long.png", width=4.6, height=5)
 ```
+
+```{r}
+library(tidytree)
+library(enrichplot)
+library(ggfun)
+library(ggupset)
+
+nodeid.tbl_tree <- utils::getFromNamespace("nodeid.tbl_tree", "tidytree")
+rootnode.tbl_tree <- utils::getFromNamespace("rootnode.tbl_tree", "tidytree")
+offspring.tbl_tree <- utils::getFromNamespace("offspring.tbl_tree", "tidytree")
+offspring.tbl_tree_item <- utils::getFromNamespace(".offspring.tbl_tree_item", "tidytree")
+child.tbl_tree <- utils::getFromNamespace("child.tbl_tree", "tidytree")
+parent.tbl_tree <- utils::getFromNamespace("parent.tbl_tree", "tidytree")
+
+uc_enrich_down_pairwise <- pairwise_termsim(uc_enrich_down)
+treeplot(uc_enrich_down_pairwise, hclust_method = "average")
+
+rc_enrich_down_pairwise <- pairwise_termsim(rc_enrich_down)
+treeplot(rc_enrich_down_pairwise, hclust_method = "average")
+#ggsave("results/figs/RNAseq-shannon/enrich_up_tree.png", width=15, height=5)
+
+
+```
+
+
+
+```{r}
+ggplot(enriched_pathways2_up, aes(x=1, y=ID_3, fill=model, color=model, size=neglog10_p.adjust)) + #, size=neglog10_p.adjust # shape=sig
+  geom_point(alpha=0.75) +
+  scale_size_continuous(limits = c(1,15), breaks = c(1, 5, 10, 15)) +
+  scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  scale_y_discrete(position = "right") +
+  #scale_shape_manual(values = c(3,3,21,21)) +
+  facet_grid(sig_in ~ ., scales="free", space="free") +
+  theme_linedraw() +
+  #xlim(values=c(0,0.15)) +
+  theme(text = element_text(size = 8),
+        axis.text.y = element_text(hjust = 1))
+#ggsave("results/figs/RNAseq-urbanism/enriched_pathways_up.png", width=4.5, height=2)
+
+ggplot(enriched_pathways2_down, aes(x=1, y=ID_3, fill=model, color=model, size=neglog10_p.adjust)) + #, size=neglog10_p.adjust # shape=sig
+  geom_point(alpha=0.75) +
+  #scale_size_continuous(limits = c(1,15), breaks = c(1, 5, 10, 15, 20)) +
+  scale_color_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  scale_fill_manual(values = c("#6FBD8B", "#7B2BC1")) +
+  scale_y_discrete(position = "right") +
+  #scale_shape_manual(values = c(3,3,21,21)) +
+  facet_grid(sig_in ~ ., scales="free", space="free") +
+  theme_linedraw() +
+  #xlim(values=c(0,0.20)) +
+  theme(text = element_text(size = 8),
+        axis.text.y = element_text(hjust = 1))
+```
+
+
+
+
+Exports
+```{r}
+enriched_pathways2_up_long <- enriched_pathways2_up %>%
+  separate_rows(geneID, sep = "/") %>%
+  dplyr::rename(hgnc_symbol = geneID) %>%
+  left_join(sig_uc_up_anno[,c("ensembl_gene_id", "hgnc_symbol")], by="hgnc_symbol") %>%
+  left_join(sig_rc_up_anno[,c("ensembl_gene_id", "hgnc_symbol")], by="hgnc_symbol") %>%
+  dplyr::mutate(ensembl_gene_id = coalesce(ensembl_gene_id.x, ensembl_gene_id.y)) %>%
+  dplyr::select(ID_3, hgnc_symbol, ensembl_gene_id, sig_in)
+#write.csv(enriched_pathways2_up_long, "results/docs/urbanism_enriched_pathway_genes_up.csv")
+  
+
+enriched_pathways2_down_long <- enriched_pathways2_down %>%
+  separate_rows(geneID, sep = "/") %>%
+  dplyr::rename(hgnc_symbol = geneID) %>%
+  left_join(sig_uc_down_anno[,c("ensembl_gene_id", "hgnc_symbol")], by="hgnc_symbol") %>%
+  left_join(sig_rc_down_anno[,c("ensembl_gene_id", "hgnc_symbol")], by="hgnc_symbol") %>%
+  dplyr::mutate(ensembl_gene_id = coalesce(ensembl_gene_id.x, ensembl_gene_id.y)) %>%
+  dplyr::select(ID_3, hgnc_symbol, ensembl_gene_id, sig_in)
+#write.csv(enriched_pathways2_down_long, "results/docs/urbanism_enriched_pathway_genes_down.csv")
+```
+
+
+
+
 Now plotting just the results of the "shared" model
 ```{r}
 enriched_pathways_sharedgenesonly <- shared_enrich_res %>%
@@ -803,7 +3193,7 @@ ggplot(enriched_pathways_sharedgenesonly, aes(x=value, y=ID, size=neglog10_p.adj
 
 
 GSEA analysis
-```{r}
+```{#r}
 uc_gene_list = uc_top$abs_l2fc 
 names(uc_gene_list) = uc_top$hgnc_symbol
 uc_gene_list = sort(uc_gene_list, decreasing = TRUE) 
