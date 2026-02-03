@@ -8,7 +8,7 @@ Initial processing of metagenomic shotgun sequences.\
 
 **02_metaG-taxoanalysis**\
 Exploratory analysis of metagenomic reads: QC metrics, differential abundance analysis, and visualization of taxonomic composition. Includes steps to filter low abundance taxa and perform transformations.\
-*Relevant for Figure 1B, Figure 1C, Figure S1C, Figure S1C, and Figure S2*.\
+*Relevant for Figure 1B, Figure 1C, Figure S1C, Figure S1D, and Figure S2*.\
 <br>
 
 **03_RNAseq-processing**\
