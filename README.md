@@ -36,17 +36,17 @@ Initial processing of lifestyle metadata, linear modeling of lifestyle data and 
 *Relevant for Figure 4A-G, Figure S7, and Figure S8*.\
 <br>
 **12_RNAseq-microbe-Lasso**\
-Pairwise microbe-host gene lasso calculations.
+Pairwise microbe-host gene lasso calculations.\
 <br>
 **13_RNAseq-microbe-Lasso-analysis**\
-Pairwise microbe-host gene lasso enrichment analyses, and visualizations.
+Pairwise microbe-host gene lasso enrichment analyses, and visualizations.\
 *Relevant for Figure 3A-B and Table S2*.\
 <br>
 **14_RNAseq-function-Lasso**\
-Pairwise microbe function-host gene lasso calculations, enrichment analyses, and visualizations.
+Pairwise microbe function-host gene lasso calculations, enrichment analyses, and visualizations.\
 *Relevant for Figure 3E-F and Table S3*.\
 <br>
 **16_diversity**\
-Calculations of alpha diversity, host gene differential abundance analysis, and host gene enrichment analyses. 
-*Relevant for Figure 2D-G*.\
+Calculations of alpha diversity, host gene differential abundance analysis, and host gene enrichment analyses.\ 
+*Relevant for Figure 2D-G*.
 
