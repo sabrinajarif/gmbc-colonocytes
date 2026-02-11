@@ -48,5 +48,5 @@ Pairwise microbe function-host gene lasso calculations, enrichment analyses, and
 <br>
 **16_diversity**\
 Calculations of alpha diversity, host gene differential abundance analysis, and host gene enrichment analyses.\ 
-*Relevant for Figure 2D-G*.
+*Relevant for Figure 2D-G*.\
 
